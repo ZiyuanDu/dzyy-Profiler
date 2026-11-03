@@ -14,15 +14,19 @@
   <a href="https://github.com/ZiyuanDu/dzyy-Profiler/stargazers"><img src="https://img.shields.io/github/stars/ZiyuanDu/dzyy-Profiler?style=flat&amp;logo=github&amp;logoColor=white" alt="GitHub stars" /></a>
 </p>
 
+<p align="center">
+  <a href="https://dlog.com.cn/learn/advanced-kernels/">Read the Blog</a>
+</p>
+
 ## A Quick Note
 
 Hi everyone, long time no see!
 
-I'm Du Ziyuan, a Bilibili creator and tech blogger. I share what I learn about AI infrastructure, GPU programming, and making large language models run faster.
+I’m Du Ziyuan, a Bilibili creator and tech blogger. I’d like to share what I’m learning about AI infrastructure, GPU programming, and ways to make large language models run faster.
 
-I'm switching to English to reach more readers around the world and help you get more comfortable with technical English. Let's keep learning and sharing together!
+I’m switching to English to reach more readers around the world. I also hope this series helps you feel more comfortable reading technical content in English. Let’s keep learning and sharing together!
 
-Our earlier series covered the basics. This one moves into **kernel fusion, performance analysis, and modern LLM workloads**. Familiar operations such as RMSNorm, RoPE, Softmax, and SwiGLU become ingredients in larger optimization problems.
+Our earlier series covered the basics. This one moves into kernel fusion, performance analysis, and modern LLM workloads. Familiar operations such as RMSNorm, RoPE, Softmax, and SwiGLU become ingredients in larger optimization problems.
 
 We'll use TileLang as the main implementation language, read other kernel ecosystems when they offer useful ideas, and follow one path throughout:
 
@@ -32,8 +36,9 @@ Ready? Let's get started!
 
 ## Contents
 
+- [A Quick Note](#a-quick-note)
+- [Contents](#contents)
 - [Quick Start](#quick-start)
-- [First Kernel](01-GEMM/00-basic-gemm.md)
 - [Goals and Scope](#goals-and-scope)
 
 <a id="环境与运行"></a>

@@ -1,0 +1,20 @@
+[project]
+name = "tilelang-tutorials"
+version = "0.1.0"
+description = "Minimal TileLang operator tutorials"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "tilelang==0.1.13",
+    "torch==2.13.0",
+]
+
+[tool.uv]
+environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu130" }
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true

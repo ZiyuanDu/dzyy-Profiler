@@ -1,0 +1,32 @@
+# Ignore everything at the repository root unless explicitly included.
+/*
+!/.gitignore
+!/.python-version
+!/README.md
+!/pyproject.toml
+!/uv.lock
+
+# Numbered lessons contain Markdown documentation and Python examples.
+!/[0-9][0-9]-*/
+/[0-9][0-9]-*/**
+!/[0-9][0-9]-*/**/
+!/[0-9][0-9]-*/**/*.md
+!/[0-9][0-9]-*/**/*.py
+
+# Keep only images referenced by the lessons; add exceptions individually.
+!/01-GEMM/posts/001-gemm-output.png
+
+# Exclude local environments, caches, and settings inside lesson directories too.
+.venv/
+__pycache__/
+.cache/
+.ruff_cache/
+.pytest_cache/
+.tilelang/
+.vscode/
+.idea/
+.agents/
+.codex/
+.aws/
+.env
+.env.*

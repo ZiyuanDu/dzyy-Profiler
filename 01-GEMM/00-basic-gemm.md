@@ -22,7 +22,7 @@ The complete example is in [`00_basic_gemm.py`](00_basic_gemm.py).
 > [!NOTE] 
 > You don't need to go through the code line by line just yet. Let's run the example first and see what it does. 
 
-If you haven’t set up the project environment yet, follow [Environment Setup](../00-Setup/README.md).
+If you haven’t set up the project environment yet, follow [Quick Start](../README.md#quick-start).
 
 
 

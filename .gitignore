@@ -6,6 +6,11 @@
 !/pyproject.toml
 !/uv.lock
 
+# Keep the project icon used by the README.
+!/assets/
+/assets/*
+!/assets/dzyy-profiler-icon.png
+
 # Numbered lessons contain Markdown documentation and Python examples.
 !/[0-9][0-9]-*/
 /[0-9][0-9]-*/**

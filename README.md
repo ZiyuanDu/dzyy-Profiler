@@ -1,4 +1,18 @@
-# Advanced GPU Kernels from Scratch
+<p align="center">
+  <img src="assets/dzyy-profiler-icon.png" alt="dzyy-Profiler logo" width="128" />
+</p>
+
+<h1 align="center">dzyy-Profiler</h1>
+
+<p align="center">GPU kernel profiling, benchmarking, and optimization.</p>
+
+<p align="center">
+  <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/Python-3.12-3776AB?logo=python&amp;logoColor=white" alt="Python 3.12" /></a>
+  <a href="https://pytorch.org/"><img src="https://img.shields.io/badge/PyTorch-2.13.0-EE4C2C?logo=pytorch&amp;logoColor=white" alt="PyTorch 2.13.0" /></a>
+  <a href="https://developer.nvidia.com/cuda-toolkit"><img src="https://img.shields.io/badge/CUDA-13.0-76B900?logo=nvidia&amp;logoColor=white" alt="CUDA 13.0" /></a>
+  <a href="https://github.com/tile-ai/tilelang"><img src="https://img.shields.io/badge/TileLang-0.1.13-0F766E" alt="TileLang 0.1.13" /></a>
+  <a href="https://github.com/ZiyuanDu/dzyy-Profiler/stargazers"><img src="https://img.shields.io/github/stars/ZiyuanDu/dzyy-Profiler?style=flat&amp;logo=github&amp;logoColor=white" alt="GitHub stars" /></a>
+</p>
 
 ## A Quick Note
 
@@ -19,11 +33,8 @@ Ready? Let's get started!
 ## Contents
 
 - [Quick Start](#quick-start)
-- [Why Go Deeper into Profiling](#why-go-deeper-into-profiling)
-- [TileLang, CUTLASS, CuTe, and Triton](#tilelang-cutlass-cute-and-triton)
-- [Goals and Scope](#scope)
-- [Curriculum](#curriculum)
-- [GEMM Version Roadmap](#gemm-versions)
+- [First Kernel](01-GEMM/00-basic-gemm.md)
+- [Goals and Scope](#goals-and-scope)
 
 <a id="环境与运行"></a>
 

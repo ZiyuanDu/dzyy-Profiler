@@ -20,6 +20,7 @@
 
 # Keep only images referenced by the lessons; add exceptions individually.
 !/01-GEMM/posts/001-gemm-output.png
+!/01-GEMM/posts/002-gemm-tiles.gif
 
 # Exclude local environments, caches, and settings inside lesson directories too.
 .venv/

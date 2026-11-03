@@ -116,17 +116,16 @@ def gemm(A, B, C, BM=128, BN=128, BK=32):
 
 ## 3. A Template to Build On
 
-We already have a head start on our next kernel. We can reuse these imports and the JIT decorator from this example.
+For later kernels, we can keep the same imports:
 
 ```python
 import tilelang
 import tilelang.language as T
 ```
 
-We use `tilelang` for compilation and `T` for operations such as `T.copy` and `T.gemm`.    
-With `@tilelang.jit`, we prepare our function for TileLang compilation.
+`T` is a short name for `tilelang.language`, which provides operations such as `T.copy` and `T.gemm`.
 
-For GEMM, we fill in the function and tensor definitions like this.
+Let's give GEMM two inputs and a place to write the result: 
 
 ```python
 @tilelang.jit
@@ -137,23 +136,38 @@ def gemm(A, B, C, BM=128, BN=128, BK=32):
     C: T.Tensor((M, N), T.float16)
 ```
 
-When we write another operator, we give the function its own name and arguments, then update the dimensions, tensor shapes, and dtypes.
+The `@tilelang.jit` decorator marks `gemm` for JIT compilation.
 
-We declare the dimensions with `T.const` and supply their values when we compile the kernel from Python.
+`A` and `B` are the input, while `C` is the output. 
+The name `A` keeps the equation tidy. 
+However, the compiler would appreciate a few more details:
+
+```python
+A: T.Tensor((M, K), T.float16)
+```
+
+This tells TileLang that `A` has `M` rows, `K` columns, and FP16 elements. The compiler can use this information before GPU memory is allocated.
+
+
+The shapes above use `M`, `N`, and `K`, declared with `T.const`. To compile this GEMM for a specific shape, we supply their values from Python:
 
 ```python
 kernel = gemm.compile(M=M, N=N, K=K)
 ```
 
-With `T.Tensor`, we tell the compiler each argument’s shape and dtype. We create the actual tensors with PyTorch before calling the compiled kernel.
+Here, the values on the right are Python integers. `.compile()` returns the callable kernel, which we save as `kernel` for use with our tensors later.
 
-We also choose `BM`, `BN`, and `BK` to set the tile sizes for our GEMM.
+`M`, `N`, and `K` describe the full matrices. `BM`, `BN`, and `BK` describe the smaller tiles used to compute them:
 
 | Parameter | Meaning | Default |
 | --- | --- | ---: |
 | `BM` | Rows in one output tile | 128 |
 | `BN` | Columns in one output tile | 128 |
 | `BK` | Reduction elements processed in one loop step | 32 |
+
+![GEMM tiles: BM sets the output rows, BN sets the output columns, and BK-sized input tiles move along K.](posts/002-gemm-tiles.gif)
+
+The output tile stays fixed while matching tiles from `A` and `B` move along `K`. Each pair adds another partial product to the same accumulator.
 
 With these defaults, each block computes a `128 × 128` output tile and moves through `K` in chunks of `32`. We can try other tile sizes in later experiments.
 

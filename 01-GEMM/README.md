@@ -11,6 +11,7 @@
 ## 目录
 
 - [先跑通第一课：TileLang 基础与最小 GEMM](00-basic-gemm.md)
+- [第二课：安装与使用 Nsight Systems，定位 GEMM 性能差距](01-nsight-systems.md)
 - [1. 参考哪些 GitHub 仓库](#1-参考哪些-github-仓库)
 - [2. 四个模块就够了](#2-四个模块就够了)
 - [3. 先把矩阵乘映射到模型组件](#3-先把矩阵乘映射到模型组件)

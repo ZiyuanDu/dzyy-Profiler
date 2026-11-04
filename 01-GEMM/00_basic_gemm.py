@@ -6,7 +6,8 @@ import torch
 from tilelang.profiler import do_bench
 
 
-# Core: C = A @ B, with FP16 inputs/output and FP32 accumulation.
+
+# Core: C = A @ B
 @tilelang.jit
 def gemm(A, B, C, BM=128, BN=128, BK=32):
     # Matrix dimensions are fixed at compile time; BM/BN/BK set tile sizes.
@@ -15,7 +16,6 @@ def gemm(A, B, C, BM=128, BN=128, BK=32):
     B: T.Tensor((K, N), T.float16)
     C: T.Tensor((M, N), T.float16)
 
-    # Each block computes one BM x BN output tile: bx selects columns, by rows.
     with T.Kernel(T.ceildiv(N, BN), T.ceildiv(M, BM), threads=128) as (bx, by):
         # Reuse input tiles in shared memory; keep partial sums in registers.
         A_shared = T.alloc_shared((BM, BK), T.float16)
@@ -31,8 +31,7 @@ def gemm(A, B, C, BM=128, BN=128, BK=32):
             T.copy(B[k * BK, bx * BN], B_shared)
             T.gemm(A_shared, B_shared, C_acc)
 
-        # Store once after the full reduction, converting FP32 sums to FP16.
-        # TileLang handles partial tiles with input zero fill and guarded stores.
+        # Store once after the full reduction
         T.copy(C_acc, C[by * BM, bx * BN])
 
 

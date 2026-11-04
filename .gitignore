@@ -6,6 +6,12 @@
 !/pyproject.toml
 !/uv.lock
 
+# Keep troubleshooting documentation.
+!/troubleshooting/
+/troubleshooting/**
+!/troubleshooting/**/
+!/troubleshooting/**/*.md
+
 # Keep the project icon used by the README.
 !/assets/
 /assets/*
@@ -18,9 +24,14 @@
 !/[0-9][0-9]-*/**/*.md
 !/[0-9][0-9]-*/**/*.py
 
-# Keep only images referenced by the lessons; add exceptions individually.
+# Publish only the final figures referenced by the lesson.
+/01-GEMM/posts/*
 !/01-GEMM/posts/001-gemm-output.png
 !/01-GEMM/posts/002-gemm-tiles.gif
+!/01-GEMM/posts/003-gemm-grid.png
+!/01-GEMM/posts/004-elephant-pipeline.gif
+!/01-GEMM/posts/005-cuda-details-cat.png
+!/01-GEMM/posts/006-cuda-vibe-comparison.png
 
 # Exclude local environments, caches, and settings inside lesson directories too.
 .venv/

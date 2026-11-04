@@ -39,6 +39,7 @@ Ready? Let's get started!
 - [A Quick Note](#a-quick-note)
 - [Contents](#contents)
 - [Quick Start](#quick-start)
+- [Troubleshooting](troubleshooting/README.md)
 - [Goals and Scope](#goals-and-scope)
 
 <a id="环境与运行"></a>
@@ -82,6 +83,8 @@ uv run --locked 01-GEMM/00_basic_gemm.py
 ```
 
 Look for **`correctness passed`**, followed by TileLang and PyTorch timings. The first run includes JIT compilation; later runs can reuse the cache.
+
+For setup and compilation errors, see [Troubleshooting](troubleshooting/README.md), including the `sm_120a` error caused by an older CUDA compiler on RTX 5090.
 
 
 ## Goals and Scope

@@ -15,22 +15,10 @@ def main():
         metavar=("M", "N", "K"),
         help="Matrix dimensions (default: 1024 1024 1024)",
     )
-    parser.add_argument(
-        "--iterations", type=int, default=20, help="Captured calls per implementation"
-    )
-    parser.add_argument(
-        "--warmup", type=int, default=25, help="Warmup calls per implementation"
-    )
-    parser.add_argument(
-        "--cache",
-        choices=("flush", "warm"),
-        default="flush",
-        help="Flush L2 before each call, or reuse inputs without flushing",
-    )
     args = parser.parse_args()
     M, N, K = args.shape
-    if min(M, N, K, args.iterations, args.warmup) <= 0:
-        parser.error("Matrix dimensions, iterations, and warmup must be positive")
+    if min(M, N, K) <= 0:
+        parser.error("M, N, and K must be positive")
     if not torch.cuda.is_available():
         raise SystemExit("CUDA GPU unavailable. Check NVIDIA drivers and GPU access.")
 
@@ -53,36 +41,27 @@ def main():
     torch.testing.assert_close(c, ref, rtol=1e-2, atol=1e-2)
 
     # Match do_bench's default 256 MiB int32 cache-flush buffer.
-    cache = None
-    if args.cache == "flush":
-        cache = torch.empty(256 * 1024 * 1024 // 4, device="cuda", dtype=torch.int32)
-        cache.zero_()
+    cache = torch.empty(256 * 1024 * 1024 // 4, device="cuda", dtype=torch.int32)
+    cache.zero_()
     # Initialize NVTX as well as the kernels before the capture starts.
     with nvtx.range("warmup"):
         for _, fn in calls:
-            for _ in range(args.warmup):
+            for _ in range(25):
                 fn()
     torch.cuda.synchronize()
     print(
         f"{torch.cuda.get_device_name()} | M={M}, N={N}, K={K} | correctness passed\n"
-        f"Capture: {args.iterations} calls per implementation | cache={args.cache}"
+        "Capture: 20 calls per implementation | flush before each call"
     )
 
     # --capture-range=cudaProfilerApi records only this warmed region.
     with profiler.profile():
         for name, fn in calls:
-            with nvtx.range(name):
-                for _ in range(args.iterations):
-                    if cache is not None:
-                        # This is benchmark preparation, separate from GEMM.
-                        with nvtx.range("cache_flush"):
-                            cache.zero_()
-                    # NVTX labels the CPU launch; GPU work can finish later.
-                    with nvtx.range(f"{name}/gemm"):
-                        fn()
-                # Drain each phase before switching implementation or stopping.
-                with nvtx.range("drain"):
-                    torch.cuda.synchronize()
+            for _ in range(20):
+                cache.zero_()  # Keep benchmark preparation outside the GEMM label.
+                with nvtx.range(name):
+                    fn()
+            torch.cuda.synchronize()
 
     print("Capture complete. Inspect the Nsight Systems report.")
 

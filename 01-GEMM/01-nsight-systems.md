@@ -1,319 +1,225 @@
-# Find the GEMM Performance Gap with Nsight Systems
+# Mind the GEMM Gap
 
-In [the first lesson](00-basic-gemm.md), we checked correctness and measured TileLang against PyTorch. Suppose the benchmark consistently shows that TileLang takes longer. Our next question is **where that extra time occurs**: inside GPU kernels, around their launches, or in additional work.
+In the [previous lesson](00-basic-gemm.md), we got our first TileLang GEMM up and running. PyTorch came out ahead in the benchmark.
 
-This lesson follows one path:
+All right, let's find out where we're losing time.
 
-> **Install → capture warmed calls → identify their kernels → inspect the timeline → choose the next investigation.**
+Our kernel already uses shared memory, Tensor Cores, and a pipeline. Before we change the code, let's see how those pieces are working together.
 
-We use Nsight Systems (`nsys`) to collect a report and its graphical application (`nsys-ui`) to explore it. The companion script is [`01_profile_gemm.py`](01_profile_gemm.py); it imports the same GEMM from the first lesson.
+## 1. Meet the Profilers
 
-**Run project commands from the repository root.** Installation commands are the exception. You need the working project environment from [Quick Start](../README.md#quick-start) and an NVIDIA GPU accessible to that environment.
+NVIDIA gives us two tools for the job:
 
-## 1. Know What This Capture Should Answer
+| [Nsight Systems](https://developer.nvidia.com/nsight-systems) (`nsys`) | [Nsight Compute](https://developer.nvidia.com/nsight-compute) (`ncu`) |
+| :---: | :---: |
+| <img src="posts/010-nsight-systems-icon.png" alt="NVIDIA Nsight Systems icon" width="80" height="80" /> | <img src="posts/011-nsight-compute-icon.png" alt="NVIDIA Nsight Compute icon" width="80" height="80" /> |
+| **Where does the time go?** See CPU work, GPU kernels, memory copies, and the gaps between them on one timeline. | **What's holding this kernel back?** Look inside a kernel: memory traffic, compute activity, and what makes threads wait. |
 
-Keep the shape that showed the gap. The commands below use `M = N = K = 1024`; replace all three values if your benchmark used another shape.
+Both tools arrived in 2018: [Nsight Systems](https://developer.nvidia.com/blog/nsight-systems-exposes-gpu-optimization/) in the spring, then [Nsight Compute 1.0](https://developer.nvidia.com/nsight-compute-history) with CUDA 10.0 in September. We'll start with the whole program, then zoom in on one kernel.
 
-By the end, you should be able to answer:
+<p align="center">
+  <img src="posts/012-thank-you-nvidia.png" alt="A cartoon parody of Linus Torvalds giving NVIDIA a thumbs-up, alongside a happy Wojak finding clues in nsys and ncu." width="720" />
+</p>
 
-1. Which GPU kernels belong to one TileLang call and one PyTorch call?
-2. How long do those kernels execute on the GPU?
-3. Are there additional kernels, copies, waits, or gaps around them?
-4. Does the next investigation belong in the calling code or inside a particular GPU kernel?
+`nsys` is handy for catching work we didn't mean to do. **John Stone** and his team ran into this while speeding up VMD, a molecular visualization tool. They found extra CPU/GPU transfers that left gaps between kernels. Their [case study](https://www.ks.uiuc.edu/Research/gpu/files/S8718-Robert-Knight-John-Stone.pdf#page=37) describes how Nsight Systems “helped identify unintentional copies.”
 
-`nsys` shows execution order and timing. Detailed questions about register pressure, shared-memory conflicts, or matrix-instruction efficiency lead to **Nsight Compute (`ncu`) after we identify the relevant kernel**. You can follow this lesson without adding `torch.profiler`.
+<p align="center">
+  <img src="posts/013-john-stone-nsys-copies.png" alt="An original slide from John Stone and colleagues showing unnecessary GPU-host copies and the resulting gaps between GPU kernels, with the presenters' red annotations." width="720" />
+</p>
 
-## 2. Install the Collector and Report Viewer
+*John Stone and colleagues, [VMD profiling case study, slide 20](https://www.ks.uiuc.edu/Research/gpu/files/S8718-Robert-Knight-John-Stone.pdf#page=20).*
 
-### Check whether the CLI is already installed
+`ncu` picks up from there. Once we've found a kernel to look at, we can check what's keeping it busy or making it wait. The report explains the metrics and suggests where to look next. CUDA architect **Stephen Jones** walks us through an example in [this talk](https://www.nvidia.com/en-us/on-demand/session/gtcspring23-S51210/), calling it “human readable analysis of what your program is doing.”
 
-On the GPU machine:
+<p align="center">
+  <img src="posts/014-stephen-jones-ncu-analysis.jpg" alt="An original slide from Stephen Jones's presentation showing Nsight Compute throughput metrics, a human-readable analysis message, and a suggested next analysis step." width="720" />
+</p>
 
-```bash
-command -v nsys
-nsys --version
-nvidia-smi
-```
+*Stephen Jones, [How to Write a CUDA Program](https://www.nvidia.com/en-us/on-demand/session/gtcspring23-S51210/), profiling section.*
 
-`command -v` prints the selected executable's location. `nsys --version` identifies the profiler; `nvidia-smi` identifies the GPU and driver. A working CUDA or PyTorch installation does not guarantee that `nsys` is on your `PATH`.
+## 2. Get the Tools Ready
 
-If the first two commands work, keep that installation and continue to the capture section. Record its version with your results.
+We'll collect the data on the GPU server and read the reports on our own computer. Your laptop doesn't need an NVIDIA GPU to open a report.
 
-### Choose the right download
-
-Open NVIDIA's [Nsight Systems download page](https://developer.nvidia.com/nsight-systems/get-started). Choose the package for the machine where each component will run:
-
-| Your setup | On the GPU machine | Where you view the report |
-| --- | --- | --- |
-| Linux desktop | Linux **Full Version** | Its included Linux GUI |
-| Linux server accessed through SSH | Linux **CLI Only** | Full Version on your desktop |
-| WSL2 | Linux CLI inside WSL | Windows Full Version is a convenient viewer |
-
-On Linux, check your distribution and CPU architecture before downloading:
-
-```bash
-cat /etc/os-release
-uname -m
-```
-
-This repository targets Linux `x86_64`. For an Ubuntu machine with that architecture, select **Linux on x86_64**, then a `.deb` package. A Linux Arm server needs the corresponding Arm package. Match the selected release to NVIDIA's supported OS, GPU, CUDA, and driver requirements; use the download page's archives when needed.
-
-For report viewing, choose the desktop's OS: Linux, Windows, or macOS. The GUI can view a report collected on a different machine. **Use the same version as the collector, or a newer viewer**, according to NVIDIA's [platform and report compatibility table](https://developer.nvidia.com/nsight-systems/get-started).
-
-### Install a downloaded Ubuntu `.deb`
-
-In the directory containing your download:
-
-```bash
-cd ~/Downloads
-sudo apt install ./YOUR_DOWNLOADED_FILE.deb
-```
-
-Replace `YOUR_DOWNLOADED_FILE.deb` with the actual filename; shell Tab completion helps. The `./` tells `apt` to install a local file and resolve its dependencies. These commands install a package on your system; they are separate from `uv sync` and the project's Python environment.
-
-Then verify:
-
-```bash
-command -v nsys
-nsys --version
-```
-
-If you installed the Full Version, also check `command -v nsys-ui`. CLI-only installations provide the collector without the graphical viewer. Other package formats and installation methods are covered in NVIDIA's [installation guide](https://docs.nvidia.com/nsight-systems/InstallationGuide/index.html).
+Both tools have desktop apps for Windows, macOS, and Linux. Copy the report over and open it in the matching app.
 
 <details>
-<summary>Installed, but the shell cannot find nsys?</summary>
+<summary>Install the tools</summary>
 
-Check the installation location reported by the installer. CUDA Toolkit installations may also provide `/usr/local/cuda/bin/nsys`; this location depends on how CUDA was installed.
+You can skip this bit if compatible versions of `nsys` and `ncu` are already installed.
 
-First run the executable by its full path. Once that works, add its containing directory to `PATH`:
+Grab the Linux installers for [Nsight Systems](https://developer.nvidia.com/nsight-systems/get-started) and [Nsight Compute](https://developer.nvidia.com/tools-overview/nsight-compute/get-started). Pick versions that support your GPU and driver. On Ubuntu, run these commands from the download folder:
 
 ```bash
-export PATH="/absolute/path/to/directory-containing-nsys:$PATH"
+sudo apt install ./nsight-systems-*.deb
+sudo bash ./nsight_compute-linux-*.run
 ```
 
-Replace the example directory with your installation's real path. Add the resulting line to your shell configuration only if you want it in future terminals. `nsys` and `nsys-ui` may be in different directories.
+Installing the tools requires sudo. For your own computer, get the desktop apps for your OS from the same pages. The `nsys` viewer should be the [same version or newer](https://docs.nvidia.com/nsight-systems/UserGuide/index.html#sharing-a-report-file) than the server's collector.
 
 </details>
 
-## 3. Capture a Small, Clearly Labeled Region
+## 3. Start with nsys
 
-Return to the repository root. Confirm that the companion script is available:
-
-```bash
-uv run --locked 01-GEMM/01_profile_gemm.py --help
-```
-
-The script prepares inputs, compiles the original kernel, checks its result, and warms up both implementations. **All of that finishes before collection starts.** NVTX supplies names for regions of code on the timeline; the script uses PyTorch's built-in NVTX functions, so no extra Python package is needed. Inside the capture, it runs 20 calls per implementation with these labels:
-
-| Label | Meaning |
-| --- | --- |
-| `TileLang/gemm` | A CPU call launching the compiled TileLang GEMM |
-| `PyTorch/gemm` | A CPU call to `torch.mm` |
-| `cache_flush` | Clear a 256 MiB buffer before a GEMM call |
-| `drain` | Wait for the current phase's queued GPU work to finish |
-
-The outer `TileLang` and `PyTorch` ranges group each phase, including its preparation and final wait. **Their durations are not per-call GEMM latency.**
-
-The default `--cache flush` uses the same 256 MiB int32-buffer clearing procedure as the first lesson's Event benchmark. Keep the flush visible so that you can distinguish benchmark preparation from GEMM execution. This reproduces the cache preparation, rather than the benchmark's entire CUDA Event sequence.
-
-Collect the report:
+Let's run our GEMM through `nsys`. We put the profiler in front of the Python command and tell it what to record. Run this from the project root on the GPU server:
 
 ```bash
-mkdir -p profiles
+# Make room for the report and nsys's temporary files.
+mkdir -p profiles /tmp/nsys-"$USER"
 
+TMPDIR=/tmp/nsys-"$USER" NSYS_TMPDIR=/tmp/nsys-"$USER" \
 nsys profile \
-  --trace=cuda,nvtx,cublas \
-  --sample=none \
-  --cpuctxsw=none \
-  --capture-range=cudaProfilerApi \
-  --capture-range-end=stop \
-  --output=profiles/gemm_1024_flush \
-  .venv/bin/python 01-GEMM/01_profile_gemm.py \
-  --shape 1024 1024 1024 --iterations 20 --cache flush
+  --trace=cuda,nvtx --sample=none --cpuctxsw=none \
+  --capture-range=cudaProfilerApi --capture-range-end=stop \
+  -o profiles/gemm_1024 \
+  .venv/bin/python 01-GEMM/01_profile_gemm.py --shape 1024 1024 1024
 ```
 
-Here is how to read that command:
+<p align="center">
+  <img src="posts/015-nsys-command.png" alt="The nsys command grouped by environment, trace, capture, output, and program." width="840" />
+</p>
 
-| Part | Purpose |
-| --- | --- |
-| `nsys profile` | Launch the application under the collector |
-| `--trace=cuda,nvtx,cublas` | Record CUDA activity, our labels, and cuBLAS API activity |
-| `--sample=none --cpuctxsw=none` | Leave CPU sampling and thread-scheduling collection off for this first trace |
-| `--capture-range=cudaProfilerApi` | Start at the script's CUDA profiler-start call |
-| `--capture-range-end=stop` | Stop collection at its profiler-stop call; let the application finish |
-| `--output=...` | Choose the report's location and filename prefix |
-| `.venv/bin/python ...` | Run with the project's already-created Python environment |
+For now, let's focus on **Trace** and **Capture**.
 
-CUDA API tracing remains enabled even though CPU sampling is off. `torch.cuda.profiler.profile()` in the script supplies the start/stop calls; it is a capture boundary for the external profiler. The corresponding collection controls are documented in NVIDIA's [focused profiling and CLI guide](https://docs.nvidia.com/nsight-systems/UserGuide/index.html#focused-profiling).
+**Trace chooses what we record.** `cuda` records CUDA calls and GPU work; `nvtx` adds our `TileLang` and `PyTorch` labels. Those are the names to look for on the timeline.
 
-Successful collection should create:
+> To see where CPU time goes, `--sample` periodically checks which code is running. To see when threads get CPU time, `--cpuctxsw` records when they are scheduled in or switched out.
+>
+> For our GEMM comparison, let's keep both at `none`. CUDA events and NVTX labels are still recorded.
 
-```text
-profiles/gemm_1024_flush.nsys-rep
-```
+**Capture chooses when we record.** Our [script](01_profile_gemm.py) uses the same GEMM as last time. It checks the result against PyTorch and warms up both versions first. The `cudaProfilerApi` option lets it start recording after that setup: **20 calls to each implementation**, and then stop.
 
-Keep this report. Statistics commands may additionally create a `.sqlite` file; `.nsys-rep` is the report to open or copy to your desktop. The repository already ignores the root-level `profiles/` directory.
+You'll find the report at `profiles/gemm_1024.nsys-rep`. Download the report, then double-click it.
 
-If the output filename already exists, choose another prefix, such as `gemm_1024_flush_run2`, and use that name in subsequent commands. The profile may take several seconds to generate even though the captured GPU work is short.
 
-## 4. Identify the Work from the Terminal
+## 4. Find Our GEMM
 
-First, associate GPU kernels with our labels:
+The timeline has a lot of colored bars. Let's pick out one GEMM call.
+
+Find a `TileLang` or `PyTorch` label, then click the GPU kernel launched by that call under **CUDA HW**. In the screenshots, red **1** marks the GPU event, orange **2** its duration, and green **3** its launch details.
+
+![TileLang: selected GPU kernel, duration, and launch details.](posts/008-nsys-tilelang.png)
+
+![PyTorch: selected GPU kernel, duration, and launch details.](posts/009-nsys-pytorch.png)
+
+Keep an eye on the GPU event's **Duration**. If Description says **Kernel launcher**, you've clicked a CPU launch call. Move to the GPU event to read the execution time. The gray CPU/NVTX ranges mark our Python calls; the GPU row shows the work they launch.
+
+Those long `FillFunctor<int>` bars are our cache flushes. We added them before each GEMM to match the benchmark's cache preparation. They account for **89.3% of all recorded kernel time** in this capture, including the buffer clearing. Use the labeled GEMM events for our comparison. The same launch can appear in several timeline rows. Count that event once.
+
+The selected calls take **31.328 µs** and **17.280 µs**. The screenshots use different zoom levels. Read the duration values when comparing them. For a better picture of the gap, let's use all 20 calls:
 
 ```bash
-nsys stats --report nvtx_kern_sum profiles/gemm_1024_flush.nsys-rep
+nsys stats --report nvtx_kern_sum profiles/gemm_1024.nsys-rep
 ```
 
-Look specifically at rows whose **NVTX Range** is `TileLang/gemm` or `PyTorch/gemm`. Read these fields together:
+Here's what we get:
 
-| Field | What to inspect |
-| --- | --- |
-| `Kernel Name` | The actual GPU function that executed |
-| `NVTX Inst` | Number of matching labeled call ranges |
-| `Kern Inst` | Number of kernel executions in that row |
-| `Med` / `Avg` | Per-kernel duration, with the units printed in the report |
-| `Total Time` | Accumulated duration for that row's kernel executions |
+| | TileLang | PyTorch |
+| --- | ---: | ---: |
+| GEMM kernels per call | 1 | 1 |
+| Median GPU duration | 29.26 µs | 16.98 µs |
 
-There are 20 labeled calls per implementation. One PyTorch call can launch multiple kernels, so inspect **all** rows for `PyTorch/gemm`. Different shapes can select different library kernels.
+This run uses an **RTX 5090 D v2** with `M=N=K=1024`. The first lesson's screenshot came from a 4070 SUPER. Those earlier timings belong to a different experiment.
 
-With nested ranges, one kernel can appear under both an inner range and its parent. **Use the exact `/gemm` ranges for comparison; adding parent and child rows would double-count work.** If you sum their kernel durations and divide by 20, you obtain average accumulated GPU kernel time per logical call. That quantity excludes gaps and is not elapsed latency when kernels overlap.
+We've found a useful clue: **the gap shows up on the GPU**. TileLang's kernel takes about 72% longer here. CPU submission costs may add to the full call's time, but we already have a difference inside the kernel to investigate.
 
-For CUDA API activity:
+Another trace might send us elsewhere. Extra kernels would give us more work to account for; gaps might lead us to submission or dependencies. This time, we can follow the slower GEMM kernel.
 
-```bash
-nsys stats --report cuda_api_sum profiles/gemm_1024_flush.nsys-rep
+## 5. A Clue in the Grid
+
+Let's start with **Grid** on the right. TileLang launches `(8,8,1)`: just **64 blocks**. PyTorch launches **128**. Our GPU has **170 SMs**.
+
+We chose `128×128` output tiles in the first lesson. For a `1024×1024` output, that's only `8×8` blocks. We haven't given the GPU enough independent blocks to put work on every SM at once.
+
+**Let's try a smaller output tile and see whether the extra blocks help.** Larger tiles reuse more inputs and do more work per block. Shrinking the tile changes both parallelism and reuse. We'll need to time the result.
+
+There's more to check in the same panel:
+
+- **Registers per thread: 240 versus 154.** Our FP32 accumulator and temporary values need registers. We need to check whether that count actually limits the kernel or causes spills.
+- **Static + dynamic shared memory: 49 versus 72 KiB per block.** PyTorch uses more and still finishes sooner. We'll judge changes to the buffering by what they do to the timing.
+- **Block: 256 versus 128 threads.** Our `threads=128` request became a 256-thread kernel with separate loading and computing groups. Run the first lesson with `--source` to see what the compiler produced.
+
+The `C_acc`, `A_shared`, and `B_shared` buffers from the first lesson now show up as resource use in the profile. We can start connecting our code to what the GPU actually runs.
+
+**Time to bring in Nsight Compute (`ncu`).** We've found the slower kernel and a parameter to test. Start with a few sections:
+
+1. **Launch Statistics + Occupancy:** check the grid and how many blocks can fit on an SM.
+2. **Compute/Memory Workload Analysis:** see which compute or memory pipelines are busy.
+3. **Scheduler Statistics:** check whether warps have instructions ready to issue.
+
+NVIDIA's [kernel diagnosis guide](https://docs.nvidia.com/nsight-compute/ComputeTriage/index.html) walks through this approach. We can collect more detail as we need it. A single percentage won't pick the best configuration for us.
+
+## 6. Try a Smaller Tile
+
+Let's give **`BN=64`** a go. Keep `BM`, `BK`, and the pipeline as they are, and use a separate runner or a copy of the kernel.
+
+```python
+candidate = gemm.compile(M=1024, N=1024, K=1024, BN=64)
 ```
 
-Use it to spot launches, waits, or unexpected allocation/copy APIs. A long synchronization call often waits for work already running on the GPU; its full duration cannot automatically be counted as extra overhead. The script deliberately synchronizes at phase boundaries.
+That takes us from 64 output blocks to 128. Reuse and accumulator size change as well. We'll keep those effects in mind when reading the results.
 
-For individual launches, including their grid and block dimensions:
+Check the answer again, then rerun the first lesson's Event benchmark with the same precision and cache preparation. **Use the benchmark to check the speedup, and the profiler to work out why.**
 
-```bash
-nsys stats --report cuda_kern_exec_trace:nvtx-name profiles/gemm_1024_flush.nsys-rep
+That change helped. Next, we kept `BN=64` and tried `BK=64`. This cuts the number of K steps in half and makes each buffered tile larger. Another tradeoff to test.
+
+Here are the medians from five runs of the independent Event benchmark on the same GPU. Keep these separate from the `nsys` durations above: the two methods time different intervals.
+
+| Trial | Event latency |
+| --- | ---: |
+| Original: `BM=128, BN=128, BK=32` | 32.000 µs |
+| Change only `BN` to `64` | 21.760 µs |
+| Then change `BK` to `64`, keeping `BN=64` | 19.712 µs |
+
+We ran the tests from copies and left the original lesson file as it was.
+
+One result is worth a second look. A `64×64` output tile with `BK=32` gave us 256 blocks, but took 27.872 µs. More blocks didn't keep making it faster. The reported register count also stayed at 240 in the faster candidates.
+
+The smaller output tile and larger reduction step made this case about **1.62× faster**. We've found better settings for this workload. We still haven't measured how much of the gain comes from parallelism, reuse, or compiler scheduling individually.
+
+Before changing the defaults, give other matrix sizes a try. A fast result at `1024³` is a good start, and we'll check how it holds up elsewhere.
+
+## 7. Keep Going
+
+We tried a few more combinations and found another candidate: **`BM=BN=BK=64`, source-level `threads=64`, three stages, and warp specialization disabled**. The compiler now produces a 64-thread kernel with `cp.async` loading. This experiment changes the thread setup and loading path too; it goes beyond the tile-size change above.
+
+```python
+@tilelang.jit(pass_configs={"tl.disable_warp_specialized": True})
+def gemm(A, B, C, BM=64, BN=64, BK=64):
+    # Keep the kernel body, but request threads=64 and retain num_stages=3.
+    ...
 ```
 
-The prefix identifies the innermost NVTX range. `API Dur` describes the launch API on the CPU, `Queue Dur` describes waiting before GPU execution, and `Kernel Dur` describes GPU execution. These intervals can overlap. A long queue can simply mean the GPU is busy with earlier work, including our cache flushes.
+Five rounds of the same Event benchmark gave **18.432 µs**, down from 19.712 µs. That's another **6.5% off the latency**. The results passed our correctness check with three random seeds. We also checked that the saved candidate only needed the one compiler flag shown above.
 
-Report availability and columns vary by version. Use `nsys stats --help-reports` to list yours and `nsys stats --help-reports nvtx_kern_sum` for its field definitions. NVIDIA's [post-collection analysis guide](https://docs.nvidia.com/nsight-systems/AnalysisGuide/index.html#statistical-analysis) documents these reports. For a general kernel summary, `cuda_gpu_kern_sum` is also useful: its `Time (%)` is a share of accumulated listed kernel time, not GPU utilization or a share of application wall time.
+Before we say we're close to the hardware limit, we need the right peak to compare against. We're doing **dense FP16 multiplication with FP32 accumulation**. AI TOPS, sparse rates, and lower-precision rates describe different work. Appendix A of NVIDIA's [Blackwell architecture paper](https://images.nvidia.com/aem-dam/Solutions/geforce/blackwell/nvidia-rtx-blackwell-gpu-architecture.pdf) lists these paths separately.
 
-## 5. Open the Timeline and Follow One Call
+Here's a rough starting point from the public GB202 rates: `170 SMs × 512 FLOP/SM/cycle × SM clock`. At 2.55 GHz, that's about **222 TFLOP/s**. The `2.147 GFLOP` in `1024³` would take **9.68 µs** if we counted only ideal computation.
 
-### Open the report
+Real kernels still have to load data, schedule work, and fill the pipeline. This estimate uses public GB202 rates; it isn't a measured peak for this particular card. Check the clock it actually ran at, too. An advertised maximum boost clock won't tell us that.
 
-On a Linux desktop with the Full Version:
+There's a catch with memory, too. Reading A and B once and writing C once adds up to **6 MiB of logical matrix I/O**. Our NCU report saw about **4.21 MB of DRAM reads and zero DRAM writes during the selected kernels**. The output stores can stay in cache until later. To work out bandwidth use, read the traffic counters at each memory level. NVIDIA's [hierarchical roofline guide](https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html#roofline-charts) explains how to do that.
 
-```bash
-nsys-ui profiles/gemm_1024_flush.nsys-rep
-```
+Here are the medians from three launches per candidate, after warm-up:
 
-Alternatively, launch NVIDIA Nsight Systems from your application menu and use **File → Open**.
+| Metric | Previous candidate | Further candidate |
+| --- | ---: | ---: |
+| Blocks / actual threads per block | 128 / 256 | 256 / 64 |
+| Tensor activity over elapsed cycles | 52.65% | 54.85% |
+| Tensor activity over active cycles | 77.84% | 60.50% |
+| Dynamic shared memory per block | 72 KiB | 48 KiB |
+| Registers per thread, reported | 240 | 134 |
+| Achieved occupancy | 14.97% | 6.27% |
+| L2 throughput | 45.37% | 56.93% |
 
-If collection happened on a server, run the following on your **desktop**, replacing the SSH destination and absolute report path:
+Occupancy went down, and the kernel got faster. The new candidate has more blocks, fewer threads per block, and a different loading path. It also asks more of L2. Together, these settings worked better here. We can't assign the whole gain to one counter.
 
-```bash
-scp USER@SERVER:/absolute/path/to/profiles/gemm_1024_flush.nsys-rep .
-```
+We also tried `4096³` to see what this card could do with more work. PyTorch reached about **207 TFLOP/s**, with **89.69% Tensor activity over elapsed cycles** and **96.50% over active cycles** in NCU. Achieved occupancy was only 8.33%. The card can get much closer to sustained Tensor capacity when the workload gives it enough work.
 
-Open the copied file in the desktop GUI. With WSL2, a Windows Nsight Systems GUI can open a copied report through **File → Open**. You do not need to install the project or run its Python code on the viewing machine.
+Our new candidate fell behind the previous one at `2048³` and `4096³`. The settings that helped at `1024³` didn't win everywhere. That's a good reason to choose configurations by shape.
 
-### Read the three relevant rows
+We ran into one tool limitation here. This card is identified as an export-control SKU, which the installed NCU Tensor Roofline section marks as unsupported. We didn't get the automatic chart or its tensor-operation counters. The peak above remains an estimate, checked against the available counters and our larger-matrix runs.
 
-Expand the process/thread and GPU rows in **Timeline View**. Names and nesting vary by version, but locate:
+Next, we can try different `BK` and stage settings for the new loading path, look into the extra L2 traffic, and compare suitable library algorithms under the same precision and cache conditions. Getting close to a good library result is encouraging. Calling it the hardware limit takes more evidence than a handful of parameter trials.
 
-| Row | What its rectangles represent |
-| --- | --- |
-| CPU thread → NVTX | Our named Python scopes |
-| CPU thread → CUDA API | CPU runtime/driver calls that submit or synchronize GPU work |
-| GPU → CUDA context → stream | Actual kernel and memory-operation execution on the GPU |
-
-Start with a middle call in the `TileLang` phase, then one in the `PyTorch` phase. Zoom until individual events are readable. Select a launch API and inspect the correlated GPU event; hover or select that GPU event to read its name, duration, stream, grid, and block details where available. Follow the correlation instead of identifying ownership only by horizontal proximity.
-
-**An NVTX range is a CPU label.** Python can return from a launch before the GPU finishes. Consequently, a `/gemm` NVTX rectangle can be shorter than its GPU kernel. Read GPU duration from the GPU event or kernel report. NVIDIA explains this relationship in its [NVTX and CUDA tracing guide](https://docs.nvidia.com/nsight-systems/UserGuide/index.html#marking-and-labeling-regions).
-
-For each implementation, inspect several calls and note:
-
-1. The kernel or kernels launched by a single `/gemm` call.
-2. Their GPU durations and whether those durations are consistent.
-3. Copies, allocations, or synchronization inside that call, if any.
-4. GPU work immediately before the call and any idle interval before it starts.
-
-The default TileLang output grid is `8 × 8` blocks with 128 threads per block. Confirm the report's launch information rather than assuming a generated kernel name. Grid size alone does not establish a bottleneck.
-
-## 6. Decide What the Evidence Supports
-
-Use this table after identifying which events actually belong to each call:
-
-| Observation | Interpretation to investigate | Next step |
-| --- | --- | --- |
-| TileLang's GEMM GPU execution is consistently longer | The kernel implementation contributes to the gap | Save its name and launch details; use `ncu` to investigate hardware execution |
-| GPU execution is similar, but repeated calls leave different idle gaps | Host submission or dependencies may contribute | Inspect correlated APIs and a no-flush trace before changing GEMM tiling |
-| One implementation launches extra kernels or copies | Additional work contributes | Determine each operation's role and compare the full logical call |
-| Most captured time belongs to `cache_flush` | The trace includes the intended cache preparation | Compare `/gemm` events separately; keep cache policy recorded |
-| Only the first captured call is unusually slow | A one-time effect may remain | Check warmup and repeated captures before explaining steady-state performance |
-
-Both kernel execution and surrounding work can contribute. Record them separately and use the timeline to see how they combine.
-
-Three observations need particular care:
-
-- **An empty stream row is not proof that the entire GPU is idle.** Inspect the other relevant streams; this capture also does not describe every other process using the device.
-- **Queue time is not idle time.** Look at what the GPU was doing while the kernel waited.
-- **Our `cache_flush` and `drain` scopes are harness operations.** Keep them distinct from work launched inside `/gemm`.
-
-If GPU execution is longer, this trace has narrowed the investigation. It has not yet shown whether the cause is insufficient parallelism, data movement, synchronization, or instruction throughput. Those are questions for the selected kernel's `ncu` report.
-
-## 7. Optional: Inspect Repeated Calls Without Cache Flushes
-
-The flush trace helps interpret the cache conditions used by the original benchmark. Its clearing operations also keep the GPU occupied between GEMMs, which can hide differences in how quickly the CPU submits repeated calls.
-
-To inspect submission and gaps under a second, explicitly different cache condition:
-
-```bash
-nsys profile \
-  --trace=cuda,nvtx,cublas \
-  --sample=none \
-  --cpuctxsw=none \
-  --capture-range=cudaProfilerApi \
-  --capture-range-end=stop \
-  --output=profiles/gemm_1024_warm \
-  .venv/bin/python 01-GEMM/01_profile_gemm.py \
-  --shape 1024 1024 1024 --iterations 20 --cache warm
-```
-
-`--cache warm` reuses the same tensors without clearing the buffer between calls. It allows cache reuse; it does not guarantee that every input remains cached. Compare TileLang and PyTorch **within this report**, then explain differences from the flush report as a separate experiment. It is not a replacement measurement for the first lesson's flush-before-call benchmark.
-
-NVTX and tracing add overhead, especially around short calls. This first collection also leaves CPU sampling and scheduling traces off, so it cannot explain every source of a host delay. If gaps become the main finding, a focused follow-up host trace can add that information. Final speed claims should still come from the independent benchmark.
-
-## 8. Troubleshoot the First Capture
-
-| Symptom | What to check |
-| --- | --- |
-| `nsys: command not found` | Installation and `PATH`; try the installed executable's full path |
-| `nsys-ui` is missing on the server | A CLI-only installation is sufficient there; open the report on a desktop with the Full Version |
-| Permission warnings mention CPU sampling or context switches | Confirm both `--sample=none` and `--cpuctxsw=none`; this lesson does not require those collections |
-| No report, or no CUDA kernel events | Check the application exit status and diagnostic messages; confirm the working benchmark and that this script reached its capture region |
-| CUDA tracing is unavailable | Check the selected Nsight release's driver/GPU/CUDA support; avoid collecting with another CUDA profiler at the same time |
-| The report opens as unsupported | Check the viewer version against the collector version |
-| Compilation or tensor initialization dominates the timeline | Confirm that you used the companion script with `--capture-range=cudaProfilerApi` |
-| An output file already exists | Choose a new `--output` prefix |
-
-Useful diagnostic commands are `nsys --version`, `nsys profile --help`, and `nsys status --environment`. NVIDIA's [release notes](https://docs.nvidia.com/nsight-systems/ReleaseNotes/index.html) cover version-specific limitations; the project's [troubleshooting index](../troubleshooting/README.md) covers environment and compilation problems.
-
-## 9. Write Down the Finding Before Optimizing
-
-Fill this small record from your own report:
-
-```text
-GPU / driver / nsys version:
-Shape / dtype / precision settings:
-Independent benchmark: TileLang ___ us; PyTorch ___ us
-Capture: flush or warm; 20 calls per implementation
-TileLang kernel name(s), count per call, and GPU duration(s):
-PyTorch kernel name(s), count per call, and GPU duration(s):
-Additional work or idle gaps, with timeline evidence:
-Conclusion supported by this capture:
-Next question and tool:
-```
-
-For example, a finding might say: “Under the same flush-before-call condition, TileLang's GEMM GPU execution is consistently longer. The next step is an `ncu` comparison of the identified kernels.” It should include your measured durations and report name before being treated as an experimental result.
-
-The commands and report names in this lesson were checked against installed Nsight Systems **2025.6.3** help and NVIDIA's online documentation on **November 4, 2026**. No GPU capture or measured bottleneck is supplied with this lesson; use the steps above to produce evidence on your own machine.
+Raw profiling reports and tuning artifacts stay local under `profiles/`.

@@ -6,6 +6,14 @@
 !/pyproject.toml
 !/uv.lock
 
+# Keep raw profiling reports and local experiments out of the repository.
+/profiles/
+*.nsys-rep
+*.qdrep
+*.qdstrm
+*.ncu-rep
+*.ncu-repz
+
 # Keep troubleshooting documentation.
 !/troubleshooting/
 /troubleshooting/**
@@ -33,6 +41,15 @@
 !/01-GEMM/posts/005-cuda-details-cat.png
 !/01-GEMM/posts/006-cuda-vibe-comparison.png
 !/01-GEMM/posts/007-gemm-code-comparison.png
+!/01-GEMM/posts/008-nsys-tilelang.png
+!/01-GEMM/posts/009-nsys-pytorch.png
+!/01-GEMM/posts/010-nsight-systems-icon.png
+!/01-GEMM/posts/011-nsight-compute-icon.png
+!/01-GEMM/posts/012-thank-you-nvidia.png
+!/01-GEMM/posts/013-john-stone-nsys-copies.png
+!/01-GEMM/posts/014-stephen-jones-ncu-analysis.jpg
+!/01-GEMM/posts/015-nsys-command.svg
+!/01-GEMM/posts/015-nsys-command.png
 
 # Exclude local environments, caches, and settings inside lesson directories too.
 .venv/

@@ -32,6 +32,7 @@
 !/01-GEMM/posts/004-elephant-pipeline.gif
 !/01-GEMM/posts/005-cuda-details-cat.png
 !/01-GEMM/posts/006-cuda-vibe-comparison.png
+!/01-GEMM/posts/007-gemm-code-comparison.png
 
 # Exclude local environments, caches, and settings inside lesson directories too.
 .venv/

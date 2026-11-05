@@ -63,15 +63,15 @@ uv run 01-GEMM/00_basic_gemm.py --source
 
 ## 2. Math and Code
 
-You’ve seen it run. The calculation is still the same familiar matrix product.
+We’ve seen it run. Now let’s take a look under the hood, starting with some familiar math.
 
 $$
 C_{M\times N}=A_{M\times K}B_{K\times N}.
 $$
 
-Each element of the `M × N` output is the sum of `K` products. `A`, `B`, and `C` use FP16 storage, with FP32 accumulation to reduce rounding error.
+Each element of the `M × N` output is a sum of `K` products. We store `A`, `B`, and `C` in FP16 and accumulate in FP32 to keep rounding error in check.
 
-Here’s the kernel:
+Here’s what that looks like in TileLang.
 
 ```python
 import tilelang
@@ -100,16 +100,16 @@ def gemm(A, B, C, BM=128, BN=128, BK=32):
 
 ## 3. A Template to Build On
 
-For later kernels, we can keep the same imports:
+We’ll reuse these two imports in later kernels.
 
 ```python
 import tilelang
 import tilelang.language as T
 ```
 
-`T` is a short name for `tilelang.language`, which provides operations such as `T.copy` and `T.gemm`.
+`T` is our shorthand for `tilelang.language`, home to operations such as `T.copy` and `T.gemm`.
 
-Let's give GEMM two inputs and a place to write the result:
+The three matrices from our equation become the arguments to `gemm`.
 
 ```python
 @tilelang.jit
@@ -120,73 +120,59 @@ def gemm(A, B, C, BM=128, BN=128, BK=32):
     C: T.Tensor((M, N), T.float16)
 ```
 
-The `@tilelang.jit` decorator marks `gemm` for JIT compilation.
+`@tilelang.jit` marks the function for compilation into a GPU kernel. `A` and `B` are the inputs, and `C` is where the result goes.
 
-`A` and `B` are the inputs, while `C` is the output.
-The name `A` keeps the equation tidy.
-However, the compiler would appreciate a few more details:
+`T.Tensor` gives each matrix a shape and dtype. For example, `A` is an `M × K` matrix of FP16 values.
 
-```python
-A: T.Tensor((M, K), T.float16)
-```
-
-This tells TileLang that `A` has `M` rows, `K` columns, and FP16 elements. The compiler can use this information before GPU memory is allocated.
-
-
-The shapes above use `M`, `N`, and `K`, declared with `T.const`. To compile this GEMM for a specific shape, we supply their values from Python:
+`T.const` declares `M`, `N`, and `K` as compile-time constants. The equation can get away with letters. The compiler needs actual numbers, which we supply from Python.
 
 ```python
 kernel = gemm.compile(M=M, N=N, K=K)
 ```
 
-Here, the values on the right are Python integers. `.compile()` returns the callable kernel, which we save as `kernel` for use with our tensors later.
+The values on the right are Python integers. `.compile()` returns a callable kernel that we’ll run with our tensors later.
 
-`M`, `N`, and `K` describe the full matrices. `BM`, `BN`, and `BK` describe the smaller tiles used to compute them:
+That sets the full matrix dimensions. The kernel works on smaller tiles, whose sizes come from `BM`, `BN`, and `BK`.
 
 | Parameter | Meaning | Default |
 | --- | --- | ---: |
 | `BM` | Rows in one output tile | 128 |
 | `BN` | Columns in one output tile | 128 |
-| `BK` | Reduction elements processed in one loop step | 32 |
+| `BK` | Step size along `K` | 32 |
+
+The defaults give us `128 × 128` output tiles, with `32` positions along `K` processed per iteration.
 
 ![GEMM tiles: BM sets the output rows, BN sets the output columns, and BK-sized input tiles move along K.](posts/002-gemm-tiles.gif)
 
-The output tile stays fixed while matching tiles from `A` and `B` move along `K`. Each pair adds another partial product to the same accumulator. The animation uses `BM = BN = BK = 2` to keep the numbers readable.
-
-The defaults in the code produce `128 × 128` output tiles and advance through `K` in steps of `32`.
+The animation uses `BM = BN = BK = 2` to keep the numbers readable. The output tile stays put while matching tiles from `A` and `B` move along `K`. Each pair’s product adds to the same running sum. There’s our sum of products again, this time in chunks.
 
 
 
 ## 4. Inside the Kernel
 
-Many GPU kernels share a common structure, whether we write them in Triton, CUDA, or TileLang. We can organize the work into four basic steps:
+We’ve chosen our tile sizes. Now let’s break the kernel’s work down into four steps.
 
-1. **Divide the work into tiles.** Split the output into smaller tiles and assign each tile to a group of threads.
-2. **Load the inputs.** Locate and load the input data needed to compute the current tile.
-3. **Compute and accumulate.** Perform the computation on the loaded data. For reductions such as GEMM, repeat the load-and-compute steps and accumulate partial results until the output tile is complete.
-4. **Store the result.** Write the completed output tile back to global memory.
+1. **Divide the work into tiles.**
+2. **Load the inputs.**
+3. **Compute and accumulate.**
+4. **Store the result.** 
 
+Here’s what those four steps look like in TileLang, Triton, and CUDA.
 
-```python
-with T.Kernel(T.ceildiv(N, BN), T.ceildiv(M, BM), threads=128) as (bx, by):
-    A_shared = T.alloc_shared((BM, BK), T.float16)
-    B_shared = T.alloc_shared((BK, BN), T.float16)
-    C_acc = T.alloc_fragment((BM, BN), T.float32)
-    T.clear(C_acc)
+![The same GEMM in TileLang, Triton, and basic CUDA. Blue marks tiling, amber marks input loads, purple marks computation and accumulation, and green marks output stores.](posts/007-gemm-code-comparison.png)
 
-    for k in T.Pipelined(T.ceildiv(K, BK), num_stages=3):
-        T.copy(A[by * BM, k * BK], A_shared)
-        T.copy(B[k * BK, bx * BN], B_shared)
-        T.gemm(A_shared, B_shared, C_acc)
+Back in our TileLang kernel, the order might look backward at first. A matrix shape lists rows before columns, while the GPU’s launch grid uses `(x, y)`. 
 
-    T.copy(C_acc, C[by * BM, bx * BN])
-```
+Here, x runs across the `N` columns and y runs down the `M` rows. That’s why `T.ceildiv(N, BN)` comes before `T.ceildiv(M, BM)`.
 
 ![Grid arguments follow x/y order. The x axis covers N columns and returns bx; the y axis covers M rows and returns by.](posts/003-gemm-grid.png)
+
+
 
 One more thing, `threads=128` gives each block 128 threads or four warps on NVIDIA GPUs. TileLang determines how the tile’s values and operations are distributed across them.
 
 ---
+
 OK, let's give it some space for the input tiles and partial sums.  
 Before the loop, we need to initialize these sums to zero with `T.clear(C_acc)`.   
 `T.alloc_shared` keeps the inputs in shared memory.    
@@ -271,5 +257,3 @@ for name, fn in (
 ```
 
 `do_bench` takes care of warmup and repeated runs. We report the median, with p10 and p90 showing the variation. Its [Event backend](https://github.com/tile-ai/tilelang/blob/v0.1.13/tilelang/profiler/bench.py) flushes L2 before each timed call for both implementations.
-
-The times come back in milliseconds. The script displays microseconds and estimates TFLOP/s from `2 * M * N * K` operations, counting a multiply and an add per term.

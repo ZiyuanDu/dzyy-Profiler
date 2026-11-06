@@ -10,13 +10,13 @@ The core computation often takes just a few lines of code.
 But once we've dealt with **thread mapping, data movement, and synchronization**, those few lines can be hard to spot.
 
 <p align="center">
-  <img src="posts/005-cuda-details-cat.png" alt="The series cat holding a small GEMM formula among code printouts, cables, and a laptop." width="520" />
+  <img src="posts/005-cuda-details-cat.webp" alt="The series cat holding a small GEMM formula among code printouts, cables, and a laptop." width="520" />
 </p>
 
 **By hand, we might spend all night getting a kernel to work. With vibe coding, we might have it working in minutes and spend all night figuring out how it works.**
 
 <p align="center">
-  <img src="posts/006-cuda-vibe-comparison.png" alt="The series cat coding CUDA late at night on the left, and puzzling over an AI-generated kernel on the right." width="640" />
+  <img src="posts/006-cuda-vibe-comparison.webp" alt="The series cat coding CUDA late at night on the left, and puzzling over an AI-generated kernel on the right." width="640" />
 </p>
 
 We'd like a kernel that's easier to write and easier to follow. 
@@ -159,7 +159,7 @@ We’ve chosen our tile sizes. Now let’s break the kernel’s work down into f
 
 Here’s what those four steps look like in TileLang, Triton, and CUDA.
 
-![The same GEMM in TileLang, Triton, and basic CUDA. Blue marks tiling, amber marks input loads, purple marks computation and accumulation, and green marks output stores.](posts/007-gemm-code-comparison.png)
+![The same GEMM in TileLang, Triton, and basic CUDA. Blue marks tiling, amber marks input loads, purple marks computation and accumulation, and green marks output stores.](posts/007-gemm-code-comparison.webp)
 
 Back in our TileLang kernel, the order might look backward at first. A matrix shape lists rows before columns, while the GPU’s launch grid uses `(x, y)`. 
 

@@ -38,18 +38,19 @@
 !/01-GEMM/posts/002-gemm-tiles.gif
 !/01-GEMM/posts/003-gemm-grid.png
 !/01-GEMM/posts/004-elephant-pipeline.gif
-!/01-GEMM/posts/005-cuda-details-cat.png
-!/01-GEMM/posts/006-cuda-vibe-comparison.png
-!/01-GEMM/posts/007-gemm-code-comparison.png
-!/01-GEMM/posts/008-nsys-tilelang.png
-!/01-GEMM/posts/009-nsys-pytorch.png
+!/01-GEMM/posts/005-cuda-details-cat.webp
+!/01-GEMM/posts/006-cuda-vibe-comparison.webp
+!/01-GEMM/posts/007-gemm-code-comparison.webp
+!/01-GEMM/posts/008-nsys-tilelang.webp
+!/01-GEMM/posts/009-nsys-pytorch.webp
 !/01-GEMM/posts/010-nsight-systems-icon.png
 !/01-GEMM/posts/011-nsight-compute-icon.png
-!/01-GEMM/posts/012-thank-you-nvidia.png
+!/01-GEMM/posts/012-thank-you-nvidia.webp
 !/01-GEMM/posts/013-john-stone-nsys-copies.png
 !/01-GEMM/posts/014-stephen-jones-ncu-analysis.jpg
-!/01-GEMM/posts/015-nsys-command.svg
 !/01-GEMM/posts/015-nsys-command.png
+!/01-GEMM/posts/016-nsys-launch-comparison.webp
+!/01-GEMM/posts/017-gemm-tile-comparison.png
 
 # Exclude local environments, caches, and settings inside lesson directories too.
 .venv/

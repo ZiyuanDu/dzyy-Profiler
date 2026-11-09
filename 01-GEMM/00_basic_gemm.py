@@ -6,17 +6,16 @@ import torch
 from tilelang.profiler import do_bench
 
 
-
 # Core: C = A @ B
 @tilelang.jit
-def gemm(A, B, C, BM=128, BN=128, BK=32):
-    # Matrix dimensions are fixed at compile time; BM/BN/BK set tile sizes.
+def gemm(A, B, C, BM=128, BN=128, BK=32, THREADS=128, STAGES=3):
+    # Shape, tile, threads and pipeline stages are compile-time parameters.
     M, N, K = T.const("M, N, K")
     A: T.Tensor((M, K), T.float16)
     B: T.Tensor((K, N), T.float16)
     C: T.Tensor((M, N), T.float16)
 
-    with T.Kernel(T.ceildiv(N, BN), T.ceildiv(M, BM), threads=128) as (bx, by):
+    with T.Kernel(T.ceildiv(N, BN), T.ceildiv(M, BM), threads=THREADS) as (bx, by):
         # Reuse input tiles in shared memory; keep partial sums in registers.
         A_shared = T.alloc_shared((BM, BK), T.float16)
         B_shared = T.alloc_shared((BK, BN), T.float16)
@@ -24,8 +23,7 @@ def gemm(A, B, C, BM=128, BN=128, BK=32):
         T.clear(C_acc)
 
         # Reduce over K in chunks of BK, overlapping tile loads and computation.
-        # Pipeline tuning can wait; focus on load -> accumulate -> store.
-        for k in T.Pipelined(T.ceildiv(K, BK), num_stages=3):
+        for k in T.Pipelined(T.ceildiv(K, BK), num_stages=STAGES):
             # T.copy copies a whole tile, using the shared buffer's shape.
             T.copy(A[by * BM, k * BK], A_shared)
             T.copy(B[k * BK, bx * BN], B_shared)

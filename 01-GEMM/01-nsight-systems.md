@@ -39,7 +39,8 @@ Both tools arrived in 2018: [Nsight Systems](https://developer.nvidia.com/blog/n
 
 ## 2. Get the Tools Ready
 
-We'll collect the data on the GPU server and read the reports on our own computer. Your laptop doesn't need an NVIDIA GPU to open a report.
+We'll collect the data on the GPU server and read the reports on our own computer. 
+So, Your own laptop doesn't need an NVIDIA GPU to open a report.
 
 Both tools have desktop apps for Windows, macOS, and Linux. Copy the report over and open it in the matching app.
 
@@ -137,354 +138,252 @@ We've found a useful clue.
 
 ## 5. A Clue in the Grid
 
-Let's take a closer look at **Grid**. Here are the launch details from both screenshots, side by side:
+Look at **Grid** in the two nsys screenshots. Here's that part of each:
 
 ![Launch details cropped from Nsight Systems: TileLang has 64 blocks and PyTorch has 128. The GPU has 170 SMs.](posts/016-nsys-launch-comparison.webp)
 
-TileLang launches `(8, 8, 1)`: **64 blocks**.    
-PyTorch launches `(128, 1, 1)`: **128 blocks**.     
-5090Dv2 has **170 SMs**.   
-Each block runs on a single SM, leaving many SMs idle during this GEMM. 
+TileLang launches `8×8×1 = 64 blocks`;\
+PyTorch launches `128×1×1 = 128 blocks`.\
+And, our GPU has **170 SMs**.\
+Generally speaking, each block runs on one SM.
+So, our 64 blocks can use at most 64 SMs at once.
 
+That gives us something to try:
 
+```text
+128×128 tiles → 8×8  =  64 blocks
+128×64  tiles → 8×16 = 128 blocks
+```
+> **Make a guess: would shrinking the tile again to `128×32` make it faster still?**
 
-For a fixed output, the block count follows from the tile size:
-`blocks = ceil(M / BM) × ceil(N / BN)`
+I went ahead and tested nine tile shapes. Let's see how your guess holds up.
 
-Our kernel uses `128×128` tiles. For a `1024×1024` output, that works out to an `8×8` grid. 
-
-More blocks give us more independent work, but smaller tiles also change input reuse and the resources each block needs.    
-We tested 9 tile shapes. On the left, `BM=128` stays fixed while `BN` changes. On the right, rows are `BM` and columns are `BN`. Green marks the lowest median in this test:
+On the left, we keep `BM=128` and change `BN`. The right shows all nine combinations.
 
 ![Left: at fixed BM=128, 64, 128, and 256 blocks take 32.03, 19.94, and 28.10 microseconds. Right: median latency for all nine BM and BN combinations.](posts/017-gemm-tile-comparison.png)
 
-These are seven-round Event measurements; the thin lines show the range of round medians. The later tuning tables use a separate five-round run.
 
-Going from **64 to 128 blocks** helps. Going from **128 to 256** makes it slower again. 
-This balance between reuse and parallel work is also covered in [NVIDIA's GEMM guide](https://docs.nvidia.com/deeplearning/performance/dl-performance-matrix-multiplication/index.html).
+**The `128×64` tile is definitely the fastest in this test.** Going from 64 to 128 blocks helps, but going to 256 makes it slower again. Block count isn't the whole story: smaller tiles also change [how much input a block can reuse](https://docs.nvidia.com/deeplearning/performance/dl-performance-matrix-multiplication/index.html#typical-tile-dimensions-in-cublas-and-performance).
+
+We have a tile to try. Next, let's use `ncu` to look inside the kernel.
 
 
-### Follow the buffers into CUDA
+## 6. Follow the Clues with ncu
 
-Okay, where do those register and shared memory numbers come from?
+We'll use [NVIDIA's Compute Triage Guide](https://docs.nvidia.com/nsight-compute/ComputeTriage/index.html) to interpret the ncu preport and decide what to optimize first.
 
-Run the first lesson with `--source` and take a look at the CUDA code TileLang generated. Here's a snippet from our original `128×128` kernel, with the loads and math left out for now:
 
-```cpp
-extern __shared__ __align__(1024) uchar buf_dyn_shmem[];
-void* A_shared = ((void*)((char*)buf_dyn_shmem + 0));
-void* B_shared = ((void*)((char*)buf_dyn_shmem + 24576));
-__shared__ __align__(16) uint64_t mbarrier_mem[6];
-float C_acc[128];
 
-if (threadIdx.x < 128) {
-    tl::warpgroup_reg_dealloc<24>();
-    // TMA loads fill A_shared and B_shared.
-} else {
-    tl::warpgroup_reg_alloc<240>();
-    // mma_sync updates C_acc; the finished values are stored to C.
-}
+
+### 1. Are the collected metrics trustworthy?
+
+> ***If the information collected is incorrect, any conclusions are meaningless.***
+
+<p align="center">
+  <img src="posts/023-garbage-in-garbage-out-cat.png" alt="Garbage in, garbage out" width="720" />
+</p>
+
+My dear friend, please don't rush to modify the code yet. **First**, Let's check if we can compare the results fairly. 
+Actually, I ran several tests, and the kernel took less time with each run. **Wow**, what a tremendous speedup!   
+But, was that really because of our code changes?
+
+In fact, the GPU clock speeds during those runs were 2.55, 2.61, 2.90 GHz. 
+At higher clock speeds, the same computation can definity take less time.
+So, frustratingly, the **Duration** values alone don't tell us how much of the speedup came from our code changes.
+
+From now on, we'll use the base clock speed and compare all configurations under the same profiling conditions. 
+These settings can affect the timings reported by ncu and nsys. 
+See the [Profiling Guide](https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html#clock-control) for details.
+
+
+Let's collect a report. Run the commands below from the **project root**.
+
+Start with our original `128×128×32` configuration. Near the top of [01_profile_gemm.py](01_profile_gemm.py), set the `gemm.compile` parameters to:
+
+```python
+kernel = gemm.compile(
+    M=M, N=N, K=K, BM=128, BN=128, BK=32,
+    THREADS=128, STAGES=3,
+)
 ```
 
-Each computing thread handles part of the output tile. Its `C_acc[128]` holds **128 FP32 running sums**.
-These sums live in **registers** (the fastest storage private to each thread on the SM).    
-Registers also hold input values, addresses, and temporary results. 
-So, as you can see, our report lists **240 registers per thread** for the compiled kernel.
-
-If the compiler has to save register values to memory and load them back later, that's called [**spilling**](https://docs.nvidia.com/cuda/cuda-programming-guide/02-basics/writing-cuda-kernels.html). Those extra accesses can cost time. We'll check for that traffic in ncu.
-
-Now follow `A_shared` and `B_shared` in the code. They hold input tiles that the block's threads can reuse while computing. Both live in **shared memory**, an area on the SM that threads in the same block can access.
-
-The loading code fills these tiles; computing threads then read the pieces they need into registers.
-
-Each FP16 value takes two bytes. We also asked for `num_stages=3`, giving us three slots for pairs of input tiles. Here's the space they need:
-
-```text
-A: 128 × 32 × 2 bytes = 8 KiB
-B:  32 × 128 × 2 bytes = 8 KiB
-Three buffer slots: 3 × (8 + 8) = 48 KiB
-```
-
-Those slots let the pipeline load later tiles while computing with an earlier pair. A gets three 8 KiB slots, and B gets another three: **24 KiB each**.
-
-Go back to the `24576` offset. That's 24 KiB in bytes. B starts there, right after A's three slots. The two regions together make up the **48 KiB** buffer named `buf_dyn_shmem[]`.
-
-The launch supplies that buffer's size for each block. This is what **dynamic shared memory** means here. The block keeps reusing the same slots as the K loop moves on.
-
-Loading ahead also needs a way to keep the two groups in step. Find `mbarrier_mem[6]`: it tracks when a slot is ready to read and when it's safe to refill. The computing threads wait for their inputs to arrive; the loading threads wait before overwriting inputs still in use.
-
-The size of this six-entry array is fixed in the compiled kernel, making it **static shared memory**. Static and dynamic are two ways of reserving space in the same shared-memory pool on the SM. [NVIDIA's shared-memory example](https://developer.nvidia.com/blog/using-shared-memory-cuda-cc/) shows both forms.
-
-The six 8-byte entries add up to 48 bytes of state. Compare that with the **1 KiB** of static memory in the report. The compiler may leave unused space to make buffers start at the required byte boundaries. That extra space is called **padding**. Our `__align__(1024)` declaration asks for a 1,024-byte boundary and can increase this padding; [NVIDIA's CCCL checks](https://nvidia.github.io/cccl/unstable/cccl/development/review_checks.html) describe the same effect. When counting how much space a block takes, use the reported 1 KiB.
-
-There's one more piece to include: the CUDA driver reserves some shared memory for its own use. [NCU lists this separately](https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html#metrics-reference), and it's **1 KiB per block** in both captures. Add it in, and we get the comparison below. All memory sizes are in KiB:
-
-| Per-block resource | TileLang | PyTorch |
-| --- | ---: | ---: |
-| Threads | 256 | 128 |
-| Reported registers per thread | 240 | 154 |
-| Static shared memory | 1 KiB | 0 KiB |
-| Dynamic shared memory | 48 KiB | 72 KiB |
-| Driver-reserved shared memory | 1 KiB | 1 KiB |
-| Total shared-memory allocation | 50 KiB | 73 KiB |
-
-If you're checking against the screenshot, its **49 versus 72 KiB** adds only static and dynamic memory. Including the driver's 1 KiB brings those totals to **50 and 73 KiB**.
-
-One line in that table may look odd: **256 threads**, even though we wrote `threads=128`. Look back at `if (threadIdx.x < 128)`. Threads 0–127 load inputs; threads 128–255 do the math. In this kernel, the compiler added a loading group alongside our computing group.
-
-That **Block Size** field counts threads in the block. It doesn't count the output values they produce. With 32 threads per warp, our launch has **four loading warps and four computing warps**.
-
-Notice the register helpers in those two branches too. The loading threads request a budget of **24 registers per thread**; the computing threads request **240**. TileLang turns these helpers into PTX [setmaxnreg](https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#miscellaneous-instructions-setmaxnreg) instructions. A register budget covers more than the running sums, including inputs and temporary values. The report's 240 isn't a count of accumulator values held by every thread.
-
-The four computing warps execute the matrix multiplies. Occupancy also counts resident warps waiting for inputs or synchronization. Keep those different jobs in mind when comparing occupancy percentages.
-
-### Turn a resource count into a test
-
-The counts become useful when we connect them to a capacity limit. For example, NCU reports a **64 KiB shared-memory configuration per SM** for the original launch. Each block consumes **50 KiB**, which allows at most one block at a time on an SM from that memory budget.
-
-The selected PyTorch launch has a **100 KiB configuration per SM**. Two of its 73 KiB blocks wouldn't fit either. Both launches have the same one-block bound from shared memory, even though their per-block allocations differ.
-
-With `BN=64`, the block's total falls to **38 KiB**, while the reported configuration stays at 64 KiB. Two blocks would need 76 KiB. **The shared-memory bound is still one block per SM.** Saving 12 KiB hasn't changed that bound.
-
-Changing `BN` also doubles the grid from 64 to 128 blocks. That gives the GPU more independent work across SMs. In our earlier five-round tuning run, Event latency falls from **32.000 to 21.760 µs**. The corresponding NCU captures show Tensor activity over elapsed cycles rising from **29.68% to 51.43%**, while achieved occupancy stays near **15.5%**. More SMs can have work even when the resident-warp percentage on active SMs barely changes.
-
-The reported register count stays at **240**, and spilling requests stay at **zero**. We can rule out reduced spill traffic as the explanation for that gain. The counters support the parallelism hypothesis; the tile change also affects input reuse and buffering.
-
-Use that same process for the next change:
-
-| Suspected limit | Evidence to look for in NCU | A focused experiment |
-| --- | --- | --- |
-| Register spills add costly accesses | Local/shared spilling requests and the instructions making them | Reduce accumulator or temporary storage; check whether spill traffic and latency fall |
-| Shared-memory use prevents more blocks from fitting | Allocated bytes per block versus the configured bytes per SM | Change `BK` or `num_stages`; check whether residency actually changes and timing improves |
-| Computing warps wait for input tiles | Low Tensor activity during active SM cycles, with waits on the compute path | Vary pipeline stages; compare Tensor activity, waits, traffic, and latency |
-
-A high register count gives us a question to investigate. Zero spills rule out one kind of cost, but registers can still limit residency. Likewise, shared memory can improve reuse and overlap while taking space away from other blocks. NVIDIA's [occupancy guidance](https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html#occupancy) discusses this tradeoff.
-
-<details>
-<summary>A fixed-grid example: more pipeline buffers</summary>
-
-In the earlier five-round tuning run, we held `BM=128, BN=64, BK=64` and the thread request fixed. Only `num_stages` changed:
-
-| Stages | A/B staging-buffer size from the code | Event median |
-| --- | ---: | ---: |
-| 2 | 48 KiB | 21.696 µs |
-| 3 | 72 KiB | 19.712 µs |
-| 4 | 96 KiB | 19.712 µs |
-
-The grid stays at 128 blocks. Three stages use more buffer space than two and give a lower measured latency. A fourth stage spends more space without improving this run's median. These values show how to choose a setting by its measured result, rather than aiming for the smallest allocation or the deepest pipeline.
-
-</details>
-
-**Keep a change when it passes the correctness check and repeated timing improves beyond the usual variation.** Use the source and counters to explain which cost changed or which hypothesis the results rule out. The counters don't have to move in the same direction.
-
-Next, use Nsight Compute (`ncu`) to compare the full reports. We have specific questions to check: spills, residency limits, and whether the computing warps have work ready.
-
-## 6. Read the NCU Report
-
-Start with a warmed-up GEMM call. Keep the cache-clearing kernels out of the selection, just as we did in `nsys`.
-
-<details>
-<summary>Collect a baseline report</summary>
-
-Run this from the project root. Use the path to your installed `ncu`; here's ours:
+Then run `ncu`:
 
 ```bash
-/opt/nvidia/nsight-compute/2026.3.1/ncu \
-  --config-file off \
-  --profile-from-start off --nvtx --nvtx-include 'TileLang/' \
-  --launch-count 3 \
-  --replay-mode kernel --cache-control all --clock-control none \
-  --section SpeedOfLight --section LaunchStats --section Occupancy \
-  --section ComputeWorkloadAnalysis --section MemoryWorkloadAnalysis_Tables \
-  --export profiles/gemm_1024_ncu \
-  .venv/bin/python 01-GEMM/01_profile_gemm.py --shape 1024 1024 1024
+ncu --set full --clock-control base \
+  --nvtx --nvtx-include TileLang/ -c 5 \
+  -f -o profiles/tilelang_128x128x32 \
+  .venv/bin/python 01-GEMM/01_profile_gemm.py
 ```
 
-`--profile-from-start off` skips the setup before the script starts profiling. `--nvtx-include 'TileLang/'` selects our TileLang calls; `--launch-count 3` collects three of them. The trailing `/` matches the push/pop NVTX ranges used by our script.
+Here's what the main options do:
 
-This profiles the original kernel. To profile a candidate, make a copy of the capture script beside it in `01-GEMM/`, change that copy's `gemm.compile(...)` arguments, and run it with a different report name. Keep the checks, warm-up, and cache preparation.
+- `--set full` collects detailed metrics.
+- `--clock-control base` uses the GPU's base clock speed.
+- `--nvtx --nvtx-include TileLang/` profiles only kernels in the `TileLang` NVTX range.
+- `-c 5` profiles five kernel launches.
 
-Our installation writes a `.ncu-repz` report; other versions may use `.ncu-rep`. Download it, then double-click it to open it in Nsight Compute.
 
-</details>
+### 2. Is the workload too small to saturate the GPU?
 
-Open the original report first. On its **Details** page, choose **Compare → Add Baseline**. After profiling a candidate, open its report in the same Nsight Compute window and switch to that result to compare the values. NVIDIA's [report comparison guide](https://docs.nvidia.com/nsight-compute/NsightCompute/index.html#baselines) shows this workflow.
+Let's go back to our original configuration. Open `tilelang_128x128x32.ncu-repz`.
 
-For this GEMM, start with these fields:
+![Nsight Compute summary for the original configuration: five kernel calls, each taking about 41 microseconds, with compute and memory throughput below 30%.](posts/024-ncu-128x128x32-summary.png)
 
-| Look at | Where to find it | What to check |
-| --- | --- | --- |
-| Grid Size and Block Size | Launch Statistics | How much independent work did we launch? What thread count did the compiler actually use? |
-| Tensor pipeline activity | Compute Workload Analysis | How busy was the pipeline doing our matrix multiplies? |
-| DRAM and L2 throughput | Memory Workload Analysis | Is either memory level close to its throughput limit? |
-| Registers, shared memory, and spilling | Launch Statistics; Memory Workload Analysis | What does each block need? Did register values spill into memory? |
-| Achieved Occupancy | Occupancy | How many warps were resident on an SM, relative to its limit? |
+The five rows are our **five kernel calls**. Focus on the columns marked in red:
 
-NVIDIA's [section reference](https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html#sections-and-rules) describes these panels. Here's how we'll use them.
+- **Duration** is the kernel's execution time: about **41 µs** per call.
+- **Compute Throughput** is about **30%** of peak.
+- **Memory Throughput** is about **17%** of peak.
 
-**Read Tensor activity over elapsed cycles first.** In **Compute Workload Analysis**, find **Tensor (All)** under **Aggregate Pipe Utilization (% of elapsed cycles)**. This includes the full kernel interval, including cycles when SMs have no work. The active-cycle chart only counts cycles when the SM is active. Both are normalized to the counter's sustained peak; neither directly measures our fraction of peak FP16 FLOP/s.
+Both throughput values are below 30%. Does the kernel have enough work to use the whole GPU? Let's check the grid.
 
-Our original kernel shows **29.68% over elapsed cycles**, versus **82.98% over active cycles**. The Tensor pipeline is much busier during active periods. Alongside the 64-block grid, that gives us a reason to try spreading the work across more SMs. It still doesn't tell us exactly how much time that change will save.
+Click **Details** next to **Summary**, then scroll down to **Launch Statistics**:
 
-**Read DRAM and L2 separately.** The original reports **10.16% DRAM throughput** and **17.40% L2 throughput**. Neither is close to its reported peak here. There's no evidence that we're filling either level's bandwidth. Waiting for data can still cost time even when bandwidth use is low.
+![Launch Statistics shows a grid of 64 blocks on a GPU with 170 SMs.](posts/025-ncu-launch-statistics.png)
 
-After a change, check the traffic counts too. A higher throughput percentage may come from moving more bytes, finishing sooner, or both. It doesn't automatically mean better reuse.
+The **Grid Size** is **64 blocks**, while our GPU has **170 SMs**.
 
-**Read resource use alongside occupancy.** Registers and shared memory can limit how many blocks fit on an SM. Spilling tells us whether values were moved out of registers into memory. Our original reports **240 registers per thread**, but **zero local and shared spilling requests**. That gives us no spill traffic to remove in this capture.
+In our GEMM, `BM` and `BN` set the output tile size for each block. Here's how they determine the grid size:
 
-Achieved occupancy counts resident warps relative to the SM's warp limit. It doesn't tell us what fraction of the GPU's SMs had work, or how busy the Tensor pipeline was. We'll check it alongside timing and pipeline activity.
+```text
+M = N = K = 1024
+BM = BN = 128
 
-Here's how those counters connect to the settings in `00`:
+grid size = ceil(M / BM) * ceil(N / BN) = 8 * 8 = 64
+```
 
-| Setting | What it changes | What to watch |
-| --- | --- | --- |
-| `BM`, `BN` | Output tile, block count, input reuse, accumulator size | Grid, Tensor activity, registers, L2 traffic |
-| `BK` | K-loop steps and input tile sizes | Timing, Tensor activity, shared memory |
-| `num_stages` | How many input batches the pipeline can buffer | Timing, Tensor activity, shared memory |
-| `threads` | How work is distributed within a block | Actual block size, registers, occupancy |
+Each block runs on one SM, so these 64 blocks can use at most **64 of the 170 SMs** at once. That leaves at least **106 SMs** with no work from this kernel at any given time.
 
-Change one setting at a time while building an explanation. Check the generated code when a change also makes the compiler choose a different loading or compute path.
+Further down in **Details**, expand **GPU and Memory Distribution** and look at **Workload Distribution**:
 
-<details>
-<summary>Find the same counters in the Raw page or a CSV export</summary>
+![Workload Distribution: SM Active Cycles has a minimum of 0, a maximum of 79,978, and an average of 29,780.49.](posts/026-ncu-workload-distribution.png)
 
-These are the names in our reports:
+The **SM Active Cycles** row shows a minimum of **0** and a maximum of about **80,000 cycles**. The average across all 170 SMs is only about **29,800 cycles**, because it includes SMs with no work from this kernel.
 
-| Counter | Metric name |
+Now change only `BN` from `128` to `64`, keeping the other parameters the same. With `BM=128, BN=64, BK=32`, the grid grows to `8×16 = 128 blocks`.
+
+Run `ncu` again with the same options. Use `-o profiles/tilelang_128x64x32` for the new report.
+
+**Wow**, the kernel now takes about **24 µs**!
+
+![Nsight Compute summary for the 128×64×32 configuration: kernel duration is about 24 microseconds, with compute throughput around 52% and memory throughput around 42%.](posts/027-ncu-128x64x32-summary.png)
+
+Compute throughput is now about **52%**, and memory throughput is about **42%**. Here's how the two configurations compare:
+
+| Metric | 128×128×32 | 128×64×32 |
+| --- | ---: | ---: |
+| Grid Size | 64 | 128 |
+| Actual Block Size (threads) | 256 | 256 |
+| Compute Throughput | 29.78% | 52.15% |
+| Memory Throughput | 16.97% | 41.86% |
+
+The larger grid lets more SMs work on the kernel at once. In the final comparison below, this change reduces **Duration** from **41.216 µs** to **23.968 µs**, about **42% less time**.
+
+Try a few more values for `BM` and `BN`. Watch how **Grid Size**, throughput, and **Duration** change. Use **Duration** to judge which configuration is faster.
+
+> Want to test these configurations automatically? Take a look at [TileLang's autotuner](https://tilelang.com/programming_guides/autotuning.html).
+
+
+### 3. Will more threads help?
+
+For our `128×64×32` configuration, compute and memory throughput are still below 60% of peak. Let's check whether the schedulers have enough warps ready to issue instructions. As we go, keep one question in mind: **does a higher percentage always mean a faster kernel?**
+
+Open **Occupancy** and **Scheduler Statistics** under **Details**.
+
+![Nsight Compute reports theoretical occupancy of 16.67% and achieved occupancy of 15.53%.](posts/028-ncu-occupancy.png)
+
+The screenshot shows **16.67% theoretical occupancy** and **15.53% achieved occupancy**. These values are close, so the kernel is already near the occupancy limit for this launch configuration.
+
+Low occupancy gives the schedulers fewer active warps to choose from, and an active warp may still be waiting for data or a dependency. An **eligible warp** is ready to issue its next instruction. Check **Eligible Warps/Scheduler** and **Issue Active** to see how many warps are ready and how often instructions are issued. [NVIDIA's metric descriptions](https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html#sections-and-rules) explain these distinctions.
+
+Let's try more threads while keeping `BM=128, BN=64, BK=32, STAGES=3` fixed. The table includes the actual block size reported by ncu, which differs from the `THREADS` setting in this kernel.
+
+| Metric | THREADS=64 | THREADS=128 | THREADS=256 | THREADS=512 |
+| --- | ---: | ---: | ---: | ---: |
+| Actual Block Size (threads) | 192 | 256 | 384 | 640 |
+| Registers/thread | 240 | 240 | 168 | 56 |
+| Achieved Occupancy | 11.49% | 15.50% | 23.72% | 39.95% |
+| Eligible Warps/Scheduler | 0.053 | 0.102 | 0.178 | 0.312 |
+| Issue Active | 5.18% | 10.02% | 14.95% | 21.43% |
+| Compute Throughput | 30.39% | 52.12% | 58.39% | 59.54% |
+| Elapsed Cycles | 81,684 | 47,876 | 43,198 | 43,226 |
+
+Going from `THREADS=64` to `256` increases occupancy and the number of eligible warps. The schedulers issue instructions more often, and **Elapsed Cycles** falls from **81,684** to **43,198**.
+
+What happens at `THREADS=512`? Occupancy rises to **39.95%** and **Issue Active** reaches **21.43%**, but the kernel still takes about **43,200 cycles**. The cycle count is almost unchanged.
+
+For more detail, open **Compute Workload Analysis** and select **Pipe Utilization (Active Cycles)**:
+
+![Compute Workload Analysis shows Tensor (All) activity at about 87% of SM active cycles.](posts/029-ncu-tensor-active-cycles.png)
+
+The **Tensor (All)** bar is around **87% of SM active cycles**. Since `THREADS=256` and `512` take almost the same number of cycles, we'll keep **`THREADS=256`**.
+
+
+### 4. Tune the pipeline with STAGES
+
+With the tile size and thread count chosen, let's look at how a block loads data and performs its computation.
+
+We keep `BM=128, BN=64, BK=32, THREADS=256`. Each block computes a `128×64` output tile, accumulating results over `1024 / 32 = 32` steps along K. Each step needs a tile of A and a tile of B in shared memory before the compute threads can use them.
+
+With only one set of input buffers, the loading threads must wait until the compute threads finish reading the current data before reusing that memory. A simple schedule looks like this:
+
+```text
+Load inputs 0 → Compute step 0 → Load inputs 1 → Compute step 1 → …
+```
+
+During each load, the compute threads wait for data. We'd like to prepare the next inputs while computing the current step.
+
+**`STAGES` controls how many input buffer sets this kernel uses.** Each set holds one A tile and one B tile. With `STAGES=2`, the work can overlap like this:
+
+| Computation | Data loading at the same time |
 | --- | --- |
-| Tensor activity, elapsed cycles | `sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_elapsed` |
-| Tensor activity, active cycles | `sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active` |
-| DRAM throughput | `gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed` |
-| L2 throughput | `lts__throughput.avg.pct_of_peak_sustained_elapsed` |
-| Achieved occupancy | `sm__warps_active.avg.pct_of_peak_sustained_active` |
-| Spilling requests | `derived__local_spilling_requests`, `derived__shared_spilling_requests` |
+| Compute step 0 using buffer set 0 | Load inputs 1 into buffer set 1 |
+| Compute step 1 using buffer set 1 | Reuse buffer set 0 to load inputs 2 |
+| Compute step 2 using buffer set 0 | Reuse buffer set 1 to load inputs 3 |
 
-Available counters and labels depend on the GPU and tool version. Hover over a field or open **Metric Details** to check its definition. An unavailable counter isn't a zero.
+While the compute threads use the current inputs, the loading threads prepare the next ones. If the data arrives in time, computation can continue without waiting for that load. This is the idea behind pipelining. See [NVIDIA's pipelining explanation](https://docs.nvidia.com/cutlass/latest/media/docs/cpp/efficient_gemm.html#pipelining) for more detail.
 
-Our original report also has inconsistent static estimates: theoretical occupancy is zero and Waves Per SM is `inf`, even though the kernel ran. We leave those fields out of the analysis and use the observed launch sizes and valid counters.
+With 3, 4, or 5 stages, the kernel has 3, 4, or 5 buffer sets. One supplies the current computation, while the others can receive or hold data for later steps. More stages allow loads to start earlier, giving the data more time to arrive while the current computation runs.
 
-</details>
+These buffers take space. Each additional stage holds another pair of FP16 input tiles: `128×32×2 + 32×64×2 = 12,288 bytes`, or **12 KiB**. A larger shared memory allocation can reduce the number of blocks that fit on an SM at once.
 
-> **Time each candidate with the Event benchmark.** NCU can replay kernels and control caches and clocks. Our captures use `--clock-control none`, and the sampled clocks differ between reports. Use NCU to investigate changes; use the repeated benchmark to rank them. NVIDIA explains these [timing differences](https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html#workload-durations).
+How many stages help this GEMM? Let's keep the other parameters fixed and test `STAGES=1` through `5`.
 
-## 7. Try a Smaller Tile
+| Metric | STAGES=1 | STAGES=2 | STAGES=3 | STAGES=4 | STAGES=5 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Duration (µs) | 32.480 | 21.600 | 21.664 | **20.896** | 21.440 |
+| Elapsed Cycles | 64,946 | 42,852 | 42,993 | **41,872** | 42,782 |
+| Compute Throughput | 38.31% | 58.13% | 58.75% | **59.46%** | 58.70% |
+| Memory Throughput | 30.90% | 46.29% | 45.90% | 46.94% | 46.27% |
+| Dynamic Shared Memory/block | 12 KiB | 24 KiB | 36 KiB | 48 KiB | 60 KiB |
+| Achieved Occupancy | 24.25% | 23.86% | 23.72% | 23.62% | 23.26% |
 
-Back to our first idea: **`BN=64`**. Keep `BM=128`, `BK=32`, `num_stages=3`, and the source-level `threads=128` request. Use a separate runner or a copy of the kernel.
+Start with **1→2 stages**. **Wow**, **Duration** falls from **32.480 µs** to **21.600 µs**, a **33.50% reduction**! Compute throughput rises from 38.31% to 58.13%, while occupancy stays around 24%. The timing improvement is consistent with better overlap between data loads and computation.
 
-```python
-candidate = gemm.compile(M=1024, N=1024, K=1024, BN=64)
-```
+For **2→3 stages**, Duration stays near **21.6 µs**. The extra buffer set adds 12 KiB of shared memory per block, with little change in timing. Two stages already provide most of the benefit in this test.
 
-That gives us **128 blocks instead of 64**. Each block also has a smaller accumulator and B tile. Input reuse changes too, which is why we need to measure the result.
+Moving from **3→4 stages** brings Duration down to **20.896 µs** and Elapsed Cycles from **42,993** to **41,872**, making four stages the fastest in this sweep. The stage count can also change the synchronization and loop management code generated by the compiler. 
 
-Check the answer against PyTorch, then rerun the Event benchmark with the same shape, precision, and cache preparation. The latency drops from **32.000 µs to 21.760 µs**.
+Finally, **4→5 stages** increases shared memory from **48 KiB** to **60 KiB**. Compute throughput falls slightly, and Duration rises to **21.440 µs**. We'll keep **`STAGES=4`**. 
 
-Next, keep `BN=64` and try **`BK=64`**:
 
-```python
-candidate = gemm.compile(M=1024, N=1024, K=1024, BN=64, BK=64)
-```
+### 5. How much faster is our kernel?
 
-The grid stays at 128 blocks. With `K=1024`, the K loop now has **16 steps instead of 32**. Each step loads larger input tiles, which also need more buffer space. This version reaches **19.712 µs**.
+Our final configuration is `128×64×32 / THREADS=256 / STAGES=4`, with register allocation handled by TileLang and the compiler. Manually setting a register budget did not improve performance in our tests.
 
-Here are the medians of five round medians. Each round uses 100 warm-up calls and 500 measured calls, with a 256 MiB cache flush before each measured GEMM:
+In this run, the configurations were tested in turn within the same process, with **five calls per configuration**. Here's how each optimization step compares with the starting point and PyTorch:
 
-| Configuration | Blocks | Event latency |
-| --- | ---: | ---: |
-| Original: `BM=128, BN=128, BK=32` | 64 | 32.000 µs |
-| Change only `BN` to `64` | 128 | 21.760 µs |
-| Then change `BK` to `64` | 128 | 19.712 µs |
-
-We ran the tests from copies and kept the original lesson file unchanged. These Event timings belong to this experiment; use them together when calculating the speedup.
-
-Now compare the NCU reports. Each value below is the median of three profiled launches:
-
-| Metric | Original | `BN=64` | `BN=64, BK=64` |
+| Implementation / configuration | Median Duration (5 calls) | Min–max | Median SM Clock |
 | --- | ---: | ---: | ---: |
-| Actual threads per block | 256 | 256 | 256 |
-| Tensor activity, elapsed cycles | 29.68% | 51.43% | 53.10% |
-| DRAM throughput | 10.16% | 19.07% | 17.39% |
-| L2 throughput | 17.40% | 44.82% | 42.97% |
-| Dynamic shared memory per block | 48 KiB | 36 KiB | 72 KiB |
-| Registers per thread, reported | 240 | 240 | 240 |
-| Achieved occupancy | 15.44% | 15.50% | 14.83% |
-| Local / shared spilling requests | 0 / 0 | 0 / 0 | 0 / 0 |
+| Original `128×128×32` | 41.216 µs | 41.056–41.440 µs | 2.009 GHz |
+| Set `BN=64` | 23.968 µs | 23.776–24.064 µs | 1.982 GHz |
+| Then set `THREADS=256` | 21.696 µs | 21.344–21.728 µs | 1.971 GHz |
+| Then set `STAGES=4` | **21.056 µs** | 20.768–21.344 µs | 1.974 GHz |
+| PyTorch / cuBLAS | 21.696 µs | 21.504–21.824 µs | 1.973 GHz |
 
-Read the changes together:
+Under the same profiling conditions, the final configuration reduces latency by **2.95%** compared with PyTorch. The grid size, scheduler activity, and pipeline tests help explain each change.
 
-- **More blocks, more Tensor activity.** Changing `BN` doubles the block count, and elapsed-cycle Tensor activity rises from 29.68% to 51.43%. This supports our parallelism hypothesis. The change also affects reuse and buffering; we haven't isolated each contribution.
-- **Larger K steps need more shared memory.** Changing `BK` doubles the dynamic allocation from 36 to 72 KiB. Timing still improves. Minimizing shared memory use would have missed this configuration.
-- **The speedup didn't require fewer registers or higher occupancy.** The reported register count stays at 240, spilling stays at zero, and occupancy barely changes. The same resident-warp percentage can produce very different performance.
+> ***I hope this tutorial can help you get off to a good start with profiling.***
 
-Together, the two parameter changes make this case about **1.62× faster**. More blocks alone aren't the whole story: a `64×64` output tile with `BK=32` gives us 256 blocks but takes **27.872 µs**, slower than either `BN=64` configuration above.
 
-## 8. Keep Going
-
-We tried a few more combinations and found another candidate: **`BM=BN=BK=64`, source-level `threads=64`, three stages, and warp specialization disabled**. In a copy of `00`, the changes look like this:
-
-```python
-@tilelang.jit(pass_configs={"tl.disable_warp_specialized": True})
-def gemm(A, B, C, BM=64, BN=64, BK=64):
-    # Keep the kernel body, but request threads=64 and retain num_stages=3.
-    ...
-```
-
-The generated kernel now uses **64 threads and `cp.async` loading**. This changes the thread setup and loading path as well as the tile size. Treat it as a new configuration to compare; it doesn't isolate a single cause.
-
-Five rounds of the same Event benchmark give **18.432 µs**, down from 19.712 µs: another **6.5% off the latency**. The candidates passed our correctness check with three random seeds.
-
-Here are the NCU results from a fresh comparison, again taking the median of three launches. The first column is the `BM=128, BN=64, BK=64` configuration from the last section:
-
-| Metric | Previous candidate | New candidate |
-| --- | ---: | ---: |
-| Blocks / actual threads per block | 128 / 256 | 256 / 64 |
-| Tensor activity, elapsed cycles | 52.65% | 54.85% |
-| Tensor activity, active cycles | 77.84% | 60.50% |
-| DRAM throughput | 19.53% | 17.97% |
-| L2 throughput | 45.37% | 56.93% |
-| Dynamic shared memory per block | 72 KiB | 48 KiB |
-| Registers per thread, reported | 240 | 134 |
-| Achieved occupancy | 14.97% | 6.27% |
-| L1/TEX-to-L2 read traffic | 48 MiB | 64 MiB |
-
-**Occupancy went down, and the kernel got faster.** There are fewer threads in each block, and the loading work is organized differently. Fewer resident warps can still do useful work efficiently. This is why we keep checking the timing instead of trying to maximize occupancy.
-
-**The two Tensor percentages move in opposite directions.** Activity over the full kernel interval rises a little; activity during active SM cycles falls. They use different denominators. Read them alongside the grid and thread changes before claiming that the math itself became more efficient.
-
-**The higher L2 percentage comes with more traffic.** Reads on the L1/TEX-to-L2 path rise from 48 to 64 MiB. The new configuration trades more traffic on that path for a lower measured latency. DRAM throughput is still below 20%; these captures don't show saturated DRAM bandwidth. Memory latency or another part of the memory path could still matter.
-
-<details>
-<summary>Dig into scheduler and warp waits when the first counters aren't enough</summary>
-
-Add `--section SchedulerStats --section WarpStateStats` to the collection command for both configurations, keeping the other settings the same.
-
-In **Scheduler Statistics**, read **Eligible Warps Per Scheduler** and **Issue Active** together. Eligible warps are ready to issue an instruction. Low issue activity alongside low Tensor activity can be a reason to investigate exposed waits.
-
-Then use **Warp State Statistics** to investigate dependencies and synchronization. Match the waits to the loading and computing work before changing the pipeline. A loading group waiting at a barrier may be part of the intended schedule.
-
-Low issue activity alone doesn't prove that Tensor work is starved. Our `4096³` PyTorch capture reaches **89.69% elapsed-cycle Tensor activity** with only **10.11% issue activity**. One issued matrix instruction can keep the execution pipeline working for multiple cycles.
-
-NVIDIA's [kernel diagnosis guide](https://docs.nvidia.com/nsight-compute/ComputeTriage/index.html) goes further into these checks. A large stall count or an automatic speedup estimate still needs an experiment to show that fixing it improves our kernel.
-
-</details>
-
-We also checked `2048³` and `4096³`. The new candidate fell behind the previous one at both sizes. The settings that help this `1024³` GEMM don't win everywhere; choose configurations by shape.
-
-<details>
-<summary>Going further: compare against a hardware ceiling</summary>
-
-Use the peak for **dense FP16 multiplication with FP32 accumulation**. AI TOPS, sparse rates, and other precisions describe different work. NVIDIA's [Blackwell architecture paper](https://images.nvidia.com/aem-dam/Solutions/geforce/blackwell/nvidia-rtx-blackwell-gpu-architecture.pdf) separates these paths.
-
-The public GB202 rate gives a rough model: `170 SMs × 512 FLOP/SM/cycle × SM clock`. At 2.55 GHz, that's about **222 TFLOP/s**. The `2.147 GFLOP` in `1024³` would take **9.68 µs** under ideal computation alone. This is an architecture-based estimate for our card; it leaves out data access, scheduling, and pipeline startup and drain. Use the clock the GPU actually ran at when applying the model.
-
-Use measured traffic for each memory level, too. Reading A and B once and writing C once adds up to **6 MiB**, but our selected kernels report about **4.21 MB of DRAM reads and zero DRAM writes** during their execution. C is still written; the stores can remain in cache until later. NVIDIA's [hierarchical roofline guide](https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html#roofline-charts) explains the memory-level comparison.
-
-For a larger workload, PyTorch reaches about **207 TFLOP/s** at `4096³`, with **89.69% Tensor activity over elapsed cycles**, **96.50% over active cycles**, and **8.33% achieved occupancy**. That shows what this card can sustain with more work. It doesn't establish the best possible latency for `1024³`.
-
-The installed NCU Tensor Roofline section marks this card's export-control SKU as unsupported. We didn't get its automatic chart or tensor-operation counters. The peak above remains an estimate, checked against the available counters and larger-matrix runs. Neither that estimate nor a finite set of parameter trials proves we've reached the best possible implementation.
-
-</details>
-
-For the next experiment, we can vary `BK` and `num_stages` on the new loading path, then check whether the extra L2 traffic can be reduced without losing parallel work. We now have both a timing method and a small set of counters to judge those changes.
-
-Raw profiling reports and tuning artifacts stay local under `profiles/`.

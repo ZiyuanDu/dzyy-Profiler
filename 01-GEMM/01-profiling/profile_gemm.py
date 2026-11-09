@@ -1,13 +1,14 @@
 """Profile TileLang GEMM and PyTorch with nsys or ncu."""
 
-from importlib import import_module
+from pathlib import Path
+from runpy import run_path
 
 import torch
 from torch.cuda import nvtx, profiler
 
 # Compile the configuration to study.
 M = N = K = 1024
-gemm = import_module("00_basic_gemm").gemm
+gemm = run_path(str(Path(__file__).resolve().parents[1] / "00-basic-gemm" / "gemm.py"))["gemm"]
 kernel = gemm.compile(
     M=M, N=N, K=K, BM=128, BN=64, BK=64,
     THREADS=256, STAGES=4,

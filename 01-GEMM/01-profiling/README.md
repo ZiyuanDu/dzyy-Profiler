@@ -1,6 +1,6 @@
 # Mind the GEMM Gap
 
-In the [previous lesson](00-basic-gemm.md), we got our first TileLang GEMM up and running. PyTorch came out ahead in the benchmark.
+In the [previous lesson](../00-basic-gemm/README.md), we got our first TileLang GEMM up and running. PyTorch came out ahead in the benchmark.
 
 All right, let's find out where we're losing time.
 
@@ -73,7 +73,7 @@ nsys profile \
   --trace=cuda,nvtx --sample=none --cpuctxsw=none \
   --capture-range=cudaProfilerApi --capture-range-end=stop \
   -o profiles/gemm_1024 \
-  .venv/bin/python 01-GEMM/01_profile_gemm.py --shape 1024 1024 1024
+  .venv/bin/python 01-GEMM/01-profiling/profile_gemm.py --shape 1024 1024 1024
 ```
 
 <p align="center">
@@ -88,7 +88,7 @@ For now, let's focus on **Trace** and **Capture**.
 >
 > For our GEMM comparison, let's keep both at `none`. CUDA events and NVTX labels are still recorded.
 
-**Capture chooses when we record.** Our [script](01_profile_gemm.py) uses the same GEMM as last time. It checks the result against PyTorch and warms up both versions first. The `cudaProfilerApi` option lets it start recording after that setup: **20 calls to each implementation**, and then stop.
+**Capture chooses when we record.** Our [script](profile_gemm.py) uses the same GEMM as last time. It checks the result against PyTorch and warms up both versions first. The `cudaProfilerApi` option lets it start recording after that setup: **20 calls to each implementation**, and then stop.
 
 You'll find the report at `profiles/gemm_1024.nsys-rep`. Download the report, then double-click it.
 
@@ -198,7 +198,7 @@ See the [Profiling Guide](https://docs.nvidia.com/nsight-compute/ProfilingGuide/
 
 Let's collect a report. Run the commands below from the **project root**.
 
-Start with our original `128×128×32` configuration. Near the top of [01_profile_gemm.py](01_profile_gemm.py), set the `gemm.compile` parameters to:
+Start with our original `128×128×32` configuration. Near the top of [profile_gemm.py](profile_gemm.py), set the `gemm.compile` parameters to:
 
 ```python
 kernel = gemm.compile(
@@ -213,7 +213,7 @@ Then run `ncu`:
 ncu --set full --clock-control base \
   --nvtx --nvtx-include TileLang/ -c 5 \
   -f -o profiles/tilelang_128x128x32 \
-  .venv/bin/python 01-GEMM/01_profile_gemm.py
+  .venv/bin/python 01-GEMM/01-profiling/profile_gemm.py
 ```
 
 Here's what the main options do:

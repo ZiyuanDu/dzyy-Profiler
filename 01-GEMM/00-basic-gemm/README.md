@@ -20,15 +20,15 @@ But once we've dealt with **thread mapping, data movement, and synchronization**
 </p>
 
 We'd like a kernel that's easier to write and easier to follow. 
-So, ***TileLang*** lets us work with whole tiles while the compiler handles much of the thread mapping. We'll revisit GEMM with the example in [`00_basic_gemm.py`](00_basic_gemm.py).
+So, ***TileLang*** lets us work with whole tiles while the compiler handles much of the thread mapping. We'll revisit GEMM with the example in [`gemm.py`](gemm.py).
 
 
 ## 1. Taking It for a Spin
 
-Before we get into the code, let's see it in action. With the [environment set up](../README.md#quick-start), we can run this from the project root.
+Before we get into the code, let's see it in action. With the [environment set up](../../README.md#quick-start), we can run this from the project root.
 
 ```bash
-uv run 01-GEMM/00_basic_gemm.py
+uv run 01-GEMM/00-basic-gemm/gemm.py
 ```
 
 The first run may take a moment while TileLang compiles the kernel.    
@@ -47,16 +47,16 @@ Those timings give us a starting point. We can also try a smaller case that's ea
 
 ```bash
 # Smaller matrices
-uv run 01-GEMM/00_basic_gemm.py --shape 128 128 128
+uv run 01-GEMM/00-basic-gemm/gemm.py --shape 128 128 128
 
 # Partial tiles in all three dimensions
-uv run 01-GEMM/00_basic_gemm.py --shape 129 257 259
+uv run 01-GEMM/00-basic-gemm/gemm.py --shape 129 257 259
 ```
 
 If you'd like a peek under the hood, `--source` prints the CUDA code TileLang generates.
 
 ```bash
-uv run 01-GEMM/00_basic_gemm.py --source
+uv run 01-GEMM/00-basic-gemm/gemm.py --source
 ```
 
 
